@@ -49,7 +49,27 @@ type DaemonTarget =
  * Get the daemon host from environment or options
  */
 export function getDaemonHost(options?: ConnectOptions): string {
-  return resolveDaemonHostCandidates(options)[0] ?? DEFAULT_HOST;
+  return redactDaemonCredentials(resolveDaemonHostCandidates(options)[0] ?? DEFAULT_HOST);
+}
+
+const SENSITIVE_QUERY_PARAMETER =
+  /([?&](?:password|passwd|token|access_token|api[_-]?key|authorization)=)[^&#\s]*/gi;
+const SENSITIVE_KEY_VALUE =
+  /(\b(?:password|passwd|token|access[_-]?token|api[_-]?key|authorization)\b\s*[:=]\s*)(["']?)[^\s,;"']+\2/gi;
+const BEARER_VALUE = /(\bBearer\s+)[^\s,;"']+/gi;
+
+/**
+ * Make a daemon target safe to use in user-facing output and diagnostics.
+ *
+ * Connection code intentionally retains the original target so that a URI
+ * password can still be used for authentication.  Anything that crosses a
+ * display/logging boundary must use this function instead.
+ */
+export function redactDaemonCredentials(value: string): string {
+  return value
+    .replace(SENSITIVE_QUERY_PARAMETER, "$1[REDACTED]")
+    .replace(SENSITIVE_KEY_VALUE, "$1[REDACTED]")
+    .replace(BEARER_VALUE, "$1[REDACTED]");
 }
 
 export function buildDaemonConnectionCommandError(options: {
@@ -57,7 +77,9 @@ export function buildDaemonConnectionCommandError(options: {
   error: unknown;
 }): DaemonConnectionCommandError {
   const host = getDaemonHost({ host: options.host });
-  const message = options.error instanceof Error ? options.error.message : String(options.error);
+  const message = redactDaemonCredentials(
+    options.error instanceof Error ? options.error.message : String(options.error),
+  );
   return {
     code: "DAEMON_NOT_RUNNING",
     message: `Cannot connect to daemon at ${host}: ${message}`,
@@ -138,9 +160,18 @@ function readPidSocketTarget(paseoHome: string): string | null {
 
   try {
     const parsed = JSON.parse(readFileSync(pidPath, "utf-8")) as {
+      pid?: unknown;
       listen?: unknown;
       sockPath?: unknown;
     };
+    if (
+      typeof parsed.pid !== "number" ||
+      !Number.isSafeInteger(parsed.pid) ||
+      parsed.pid <= 0 ||
+      !isPidRunning(parsed.pid)
+    ) {
+      return null;
+    }
     if (typeof parsed.listen === "string") return parsed.listen;
     if (typeof parsed.sockPath === "string") return parsed.sockPath;
     return null;
@@ -149,15 +180,19 @@ function readPidSocketTarget(paseoHome: string): string | null {
   }
 }
 
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function resolveConfiguredIpcDaemonHost(env: NodeJS.ProcessEnv, paseoHome: string): string | null {
   const directEnvHost = normalizeDaemonHost(env.PASEO_LISTEN ?? "");
   if (isIpcDaemonHost(directEnvHost)) {
     return directEnvHost;
-  }
-
-  const pidHost = normalizeDaemonHost(readPidSocketTarget(paseoHome) ?? "");
-  if (isIpcDaemonHost(pidHost)) {
-    return pidHost;
   }
 
   const config = loadConfig(paseoHome, { env });
@@ -176,6 +211,10 @@ function resolveConfiguredTcpDaemonHost(env: NodeJS.ProcessEnv, paseoHome: strin
 export function resolveDefaultDaemonHosts(env: NodeJS.ProcessEnv = process.env): string[] {
   const paseoHome = resolvePaseoHome(env);
   const candidates: string[] = [];
+  const liveRuntimeHost = normalizeDaemonHost(readPidSocketTarget(paseoHome) ?? "");
+  if (liveRuntimeHost) {
+    candidates.push(liveRuntimeHost);
+  }
   const configuredIpcHost = resolveConfiguredIpcDaemonHost(env, paseoHome);
   if (configuredIpcHost) {
     candidates.push(configuredIpcHost);
@@ -206,7 +245,7 @@ function stripIpcPrefix(trimmed: string): string {
 export function resolveDaemonTarget(host: string): DaemonTarget {
   const trimmed = normalizeDaemonHost(host);
   if (!trimmed) {
-    throw new Error(`Invalid daemon target: ${host}`);
+    throw new Error(`Invalid daemon target: ${redactDaemonCredentials(host)}`);
   }
   if (
     trimmed.startsWith("unix://") ||
@@ -377,7 +416,7 @@ export async function connectToDaemon(options?: ConnectOptions): Promise<DaemonC
     const failure = tunnel.failureDetail();
     tunnel.close();
     if (failure) throw new Error(`SSH connection failed: ${failure}`, { cause: result.error });
-    throw result.error;
+    throw redactConnectionError(result.error);
   }
   const offer = parseHostOfferOrNull(explicitHost);
   if (offer) {
@@ -388,19 +427,34 @@ export async function connectToDaemon(options?: ConnectOptions): Promise<DaemonC
 
   async function tryNext(index: number, lastError: unknown): Promise<DaemonClient> {
     if (index >= hosts.length) {
-      if (lastError instanceof Error) throw lastError;
-      throw new Error(`Unable to connect to Paseo daemon via ${hosts.join(", ")}`);
+      if (lastError instanceof Error) throw redactConnectionError(lastError);
+      throw new Error(
+        redactDaemonCredentials(`Unable to connect to Paseo daemon via ${hosts.join(", ")}`),
+      );
     }
     const host = hosts[index];
     const password = resolveDaemonPassword(host);
-    const result = await tryConnectHost(host, password, clientId, timeout, nodeWebSocketFactory);
-    if ("client" in result) {
-      return result.client;
+    try {
+      const result = await tryConnectHost(host, password, clientId, timeout, nodeWebSocketFactory);
+      if ("client" in result) {
+        return result.client;
+      }
+      return tryNext(index + 1, result.error);
+    } catch (error) {
+      return tryNext(index + 1, redactConnectionError(error));
     }
-    return tryNext(index + 1, result.error);
   }
 
   return tryNext(0, null);
+}
+
+function redactConnectionError(error: unknown): Error {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const safeMessage = redactDaemonCredentials(rawMessage);
+  if (error instanceof Error && safeMessage === rawMessage) {
+    return error;
+  }
+  return new Error(safeMessage, { cause: error });
 }
 
 /**

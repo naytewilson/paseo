@@ -11,12 +11,18 @@ import { asInternals, createStub } from "./test-utils/class-mocks.js";
 import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
 import type { PushNotificationSender, PushPayload } from "./push/index.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { hashDaemonPassword } from "./auth.js";
 
 const WORKSPACE_ID = "workspace-1";
 
 const wsModuleMock = vi.hoisted(() => {
   class MockWebSocketServer {
+    readonly options: Record<string, unknown>;
     readonly handlers = new Map<string, (...args: unknown[]) => void>();
+
+    constructor(options: Record<string, unknown>) {
+      this.options = options;
+    }
 
     on(event: string, handler: (...args: unknown[]) => void) {
       this.handlers.set(event, handler);
@@ -42,9 +48,19 @@ vi.mock("./session.js", () => ({
 }));
 
 import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
+import { MAX_PENDING_CONNECTIONS, MAX_WS_PAYLOAD_BYTES } from "./websocket-server.js";
 
 interface WebSocketServerInternals {
   sessions: Map<unknown, unknown>;
+  pendingConnections: Map<unknown, unknown>;
+  wss: { options: Record<string, unknown> };
+  handleRawMessage: (ws: unknown, data: string) => void;
+  attachSocket: (ws: unknown, request?: unknown) => Promise<void>;
+  attachAuthenticatedSocket: (
+    ws: unknown,
+    request: unknown,
+    password: string | undefined,
+  ) => Promise<void>;
   broadcastAgentAttention(params: {
     agentId: string;
     reason: string;
@@ -81,7 +97,10 @@ class RecordingPushNotificationSender implements PushNotificationSender {
   }
 }
 
-function createServer(agentManagerOverrides?: Record<string, unknown>) {
+function createServer(
+  agentManagerOverrides?: Record<string, unknown>,
+  auth?: { password: string },
+) {
   const pushNotifications = new RecordingPushNotificationSender();
   const agentManager = {
     subscribe: vi.fn(() => () => {}),
@@ -116,7 +135,7 @@ function createServer(agentManagerOverrides?: Record<string, unknown>) {
     null,
     { allowedOrigins: new Set() },
     createWorkspaceAutoNameStub(),
-    undefined,
+    auth,
     undefined,
     undefined,
     undefined,
@@ -249,6 +268,50 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
       },
     ]);
     expect(getLastAssistantMessage).toHaveBeenCalledWith("agent-1");
+  });
+
+  it("configures an explicit inbound payload bound while accepting ordinary frames", () => {
+    const { server } = createServer();
+    const internals = asInternals<WebSocketServerInternals>(server);
+
+    expect(internals.wss.options.maxPayload).toBe(MAX_WS_PAYLOAD_BYTES);
+    expect(MAX_WS_PAYLOAD_BYTES).toBeLessThan(100 * 1024 * 1024);
+
+    const ws = createOpenSocket();
+    internals.handleRawMessage(ws, JSON.stringify({ type: "ping" }));
+
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: "pong" }));
+  });
+
+  it("refuses a new pending connection when the pre-hello bound is full", async () => {
+    const { server } = createServer();
+    const internals = asInternals<WebSocketServerInternals>(server);
+
+    for (let index = 0; index < MAX_PENDING_CONNECTIONS; index += 1) {
+      internals.pendingConnections.set({}, {});
+    }
+
+    const ws = createOpenSocket();
+    await internals.attachSocket(ws);
+
+    expect(ws.close).toHaveBeenCalledWith(4004, expect.any(String));
+    expect(internals.pendingConnections.has(ws)).toBe(false);
+  });
+
+  it("keeps authenticated clients on the normal pending-connection path", async () => {
+    const password = "resource-boundary-test-password";
+    const { server } = createServer(undefined, { password: hashDaemonPassword(password) });
+    const internals = asInternals<WebSocketServerInternals>(server);
+    const ws = createOpenSocket();
+
+    await internals.attachAuthenticatedSocket(
+      ws,
+      { headers: { "sec-websocket-protocol": `paseo.bearer.${password}` } },
+      hashDaemonPassword(password),
+    );
+
+    expect(internals.pendingConnections.has(ws)).toBe(true);
+    expect(ws.on).toHaveBeenCalledWith("message", expect.any(Function));
   });
 
   it("sends push notifications regardless of UI label presence", async () => {

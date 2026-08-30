@@ -19,6 +19,7 @@ async function runSupervisorFixture(options: {
   signal: NodeJS.Signals | null;
   elapsedMs: number;
   log: string;
+  providerLog: string;
   stdout: string;
   stderr: string;
 }> {
@@ -87,7 +88,8 @@ async function runSupervisorFixture(options: {
   });
 
   const log = await readFile(logPath, "utf8");
-  return { code, signal, elapsedMs: Date.now() - startedAt, log, stdout, stderr };
+  const providerLog = await readFile(`${logPath}.providers`, "utf8").catch(() => "");
+  return { code, signal, elapsedMs: Date.now() - startedAt, log, providerLog, stdout, stderr };
 }
 
 describe("supervisor durable logging", () => {
@@ -142,7 +144,7 @@ describe("supervisor durable logging", () => {
     });
   });
 
-  test("writes supervised worker stdout and stderr to daemon.log", async () => {
+  test("keeps supervised worker stdout and stderr out of daemon.log", async () => {
     const result = await runSupervisorFixture({
       workerSource: `
         process.stdout.write('{"level":30,"msg":"worker-json-stdout"}\\n');
@@ -153,8 +155,10 @@ describe("supervisor durable logging", () => {
 
     expect(result.code).toBe(0);
     expect(result.signal).toBeNull();
-    expect(result.log).toContain('"worker-json-stdout"');
-    expect(result.log).toContain('"worker-json-stderr"');
+    expect(result.log).not.toContain('"worker-json-stdout"');
+    expect(result.log).not.toContain('"worker-json-stderr"');
+    expect(result.providerLog).toContain('"worker-json-stdout"');
+    expect(result.providerLog).toContain('"worker-json-stderr"');
     expect(result.stdout).toContain('"worker-json-stdout"');
     expect(result.stderr).toContain('"worker-json-stderr"');
   });
@@ -168,8 +172,55 @@ describe("supervisor durable logging", () => {
       `,
     });
 
-    expect(result.log).toContain("raw stdout line\n");
-    expect(result.log).toContain("raw stderr line\n");
+    expect(result.log).not.toContain("raw stdout line");
+    expect(result.log).not.toContain("raw stderr line");
+    expect(result.providerLog).toContain("raw stdout line");
+    expect(result.providerLog).toContain("raw stderr line");
+  });
+
+  test("keeps multiline provider stderr from corrupting daemon JSONL", async () => {
+    const result = await runSupervisorFixture({
+      workerSource: `
+        process.stderr.write('first provider line\\nsecond provider line\\npassword=PROVIDER_SENTINEL\\n{"token":"PROVIDER_JSON_SECRET","event":"provider failure"}\\nAuthorization: Bearer PROVIDER_BEARER_SECRET\\n');
+        process.exit(0);
+      `,
+    });
+
+    const daemonRecords = result.log
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const providerRecords = result.providerLog
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { message?: string; stream?: string });
+
+    expect(daemonRecords.length).toBeGreaterThan(0);
+    expect(providerRecords).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: "first provider line", stream: "stderr" }),
+        expect.objectContaining({ message: "second provider line", stream: "stderr" }),
+      ]),
+    );
+    expect(result.log).not.toContain("PROVIDER_SENTINEL");
+    expect(result.providerLog).not.toContain("PROVIDER_SENTINEL");
+    expect(result.providerLog).not.toContain("PROVIDER_JSON_SECRET");
+    expect(result.providerLog).not.toContain("PROVIDER_BEARER_SECRET");
+  });
+
+  test("redacts credentials split across provider output chunks", async () => {
+    const result = await runSupervisorFixture({
+      workerSource: `
+        process.stderr.write('password=PROVIDER_SPLIT_');
+        setTimeout(() => {
+          process.stderr.write('SECRET\\n');
+          process.exit(0);
+        }, 10);
+      `,
+    });
+
+    expect(result.providerLog).not.toContain("PROVIDER_SPLIT_SECRET");
+    expect(result.providerLog).not.toContain("SECRET");
   });
 
   test("logs the worker shutdown reason before signaling the worker", async () => {

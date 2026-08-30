@@ -18,7 +18,24 @@ interface ExternalEnvOptions {
   envOverlay?: ProcessEnvRecord;
 }
 
-export type SpawnProcessOptions = Omit<SpawnOptions, "env"> & ExternalEnvOptions;
+export interface SpawnProcessOptions extends Omit<SpawnOptions, "env">, ExternalEnvOptions {
+  /** Create a dedicated POSIX process group whose descendants can be reaped after reparenting. */
+  processGroupOwnership?: boolean;
+}
+
+export type SpawnedProcess = ChildProcess & {
+  /** POSIX process-group ID when this launch owns a dedicated group. */
+  processGroupId?: number;
+};
+
+export function getProcessGroupId(child: ChildProcess): number | undefined {
+  const processGroupId = (child as SpawnedProcess).processGroupId;
+  return typeof processGroupId === "number" &&
+    Number.isInteger(processGroupId) &&
+    processGroupId > 0
+    ? processGroupId
+    : undefined;
+}
 
 interface ExecCommandOptions extends ExternalEnvOptions {
   cwd?: string;
@@ -56,8 +73,8 @@ export function spawnProcess(
   command: string,
   args: string[],
   options?: SpawnProcessOptions,
-): ChildProcess {
-  const { baseEnv, env, envOverlay, ...spawnOptions } = options ?? {};
+): SpawnedProcess {
+  const { baseEnv, env, envOverlay, processGroupOwnership, ...spawnOptions } = options ?? {};
   const resolvedBaseEnv = env ?? baseEnv ?? process.env;
   const isWindows = process.platform === "win32";
   const shell = shouldUseWindowsShell(command, spawnOptions.shell);
@@ -74,13 +91,27 @@ export function spawnProcess(
           ...(envOverlay ? [envOverlay] : []),
         );
 
-  return spawn(resolvedCommand, resolvedArgs, {
+  const ownsProcessGroup =
+    !isWindows && (processGroupOwnership === true || spawnOptions.detached === true);
+  const child = spawn(resolvedCommand, resolvedArgs, {
     ...spawnOptions,
+    ...(ownsProcessGroup ? { detached: true } : {}),
     env: childEnv,
     shell,
     signal: options?.signal,
     windowsHide: true,
   });
+
+  if (ownsProcessGroup && typeof child.pid === "number" && child.pid > 0) {
+    Object.defineProperty(child, "processGroupId", {
+      configurable: false,
+      enumerable: false,
+      value: child.pid,
+      writable: false,
+    });
+  }
+
+  return child as SpawnedProcess;
 }
 
 export async function execCommand(

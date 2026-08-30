@@ -2486,6 +2486,23 @@ describe("ACPAgentSession", () => {
     );
   });
 
+  test("consumes an unknown Grok vendor notification without a method-not-found error", async () => {
+    const logger = createTestLogger();
+    const error = vi.spyOn(logger, "error");
+    const trace = vi.spyOn(logger, "trace");
+    const session = createSessionWithConfig({ provider: "grok" }, logger);
+
+    await expect(
+      session.extNotification("_grok.dev/telemetry/updated", {
+        sessionId: "session-1",
+        token: "extension-notification-test-sentinel",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(error).not.toHaveBeenCalled();
+    expect(JSON.stringify(trace.mock.calls)).not.toContain("extension-notification-test-sentinel");
+  });
+
   test("maps the Kiro _kiro.dev/commands/available notification into slash commands and skills", async () => {
     const session = createKiroSession({
       waitForInitialCommands: true,

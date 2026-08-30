@@ -58,6 +58,7 @@ import {
   type Stream as ACPStream,
 } from "@agentclientprotocol/sdk";
 import type { Logger } from "pino";
+import type { ManagedProcessRegistry } from "../../managed-processes/managed-processes.js";
 
 import {
   getAgentStreamEventTurnId,
@@ -118,7 +119,7 @@ import {
   buildStringCommandShellInvocation,
   createStringCommandShellEnvOverlay,
 } from "../../../utils/string-command-shell.js";
-import { spawnProcess } from "../../../utils/spawn.js";
+import { getProcessGroupId, spawnProcess } from "../../../utils/spawn.js";
 import {
   type DiagnosticEntry,
   toDiagnosticErrorMessage,
@@ -439,6 +440,7 @@ interface ACPAgentClientOptions {
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
   terminateProcess?: ProcessTerminator;
+  managedProcesses?: ManagedProcessRegistry;
 }
 
 interface ACPAgentSessionOptions {
@@ -472,6 +474,7 @@ interface ACPAgentSessionOptions {
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
   terminateProcess?: ProcessTerminator;
+  managedProcesses?: ManagedProcessRegistry;
 }
 
 export interface SpawnedACPProcess {
@@ -479,6 +482,8 @@ export interface SpawnedACPProcess {
   connection: ClientSideConnection;
   initialize: InitializeResponse;
   stderrChunks?: string[];
+  command?: string;
+  args?: string[];
 }
 
 type UninitializedACPProcess = Omit<SpawnedACPProcess, "initialize"> & {
@@ -489,6 +494,8 @@ interface ACPProcessTransport {
   child: ChildProcessWithoutNullStreams;
   connection: ClientSideConnection;
   stderrChunks: string[];
+  command: string;
+  args: string[];
   spawnReady: Promise<void>;
   spawnError: Promise<never>;
 }
@@ -827,6 +834,7 @@ export class ACPAgentClient implements AgentClient {
   private readonly initialCommandsWaitTimeoutMs: number;
   private readonly extensionCommandsParser?: ACPExtensionCommandsParser;
   protected readonly terminateProcess: ProcessTerminator;
+  private readonly managedProcesses?: ManagedProcessRegistry;
 
   constructor(options: ACPAgentClientOptions) {
     this.provider = options.provider;
@@ -854,6 +862,7 @@ export class ACPAgentClient implements AgentClient {
     this.waitForInitialCommands = options.waitForInitialCommands ?? false;
     this.initialCommandsWaitTimeoutMs = options.initialCommandsWaitTimeoutMs ?? 1500;
     this.extensionCommandsParser = options.extensionCommandsParser;
+    this.managedProcesses = options.managedProcesses;
   }
 
   async createSession(
@@ -886,6 +895,7 @@ export class ACPAgentClient implements AgentClient {
         extensionCommandsParser: this.extensionCommandsParser,
         waitForInitialCommands: this.waitForInitialCommands,
         initialCommandsWaitTimeoutMs: this.initialCommandsWaitTimeoutMs,
+        managedProcesses: this.managedProcesses,
       },
     );
     await session.initializeNewSession();
@@ -937,6 +947,7 @@ export class ACPAgentClient implements AgentClient {
       extensionCommandsParser: this.extensionCommandsParser,
       waitForInitialCommands: this.waitForInitialCommands,
       initialCommandsWaitTimeoutMs: this.initialCommandsWaitTimeoutMs,
+      managedProcesses: this.managedProcesses,
     });
     await session.initializeResumedSession();
     return session;
@@ -1113,6 +1124,8 @@ export class ACPAgentClient implements AgentClient {
       child: transport.child,
       connection: transport.connection,
       stderrChunks: transport.stderrChunks,
+      command: transport.command,
+      args: transport.args,
     };
     options?.onSpawned?.(probe);
     try {
@@ -1133,6 +1146,7 @@ export class ACPAgentClient implements AgentClient {
     const { command, args } = await this.resolveLaunchCommand();
     const child = spawnProcess(command, args, {
       cwd: process.cwd(),
+      processGroupOwnership: true,
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
         overlays: [launchEnv],
@@ -1169,6 +1183,8 @@ export class ACPAgentClient implements AgentClient {
       child,
       connection,
       stderrChunks,
+      command,
+      args,
       spawnReady: spawnReadyPromise,
       spawnError: spawnErrorPromise,
     };
@@ -1460,6 +1476,8 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private replayingHistory = false;
   private bootstrapThreadEventPending = false;
   private readonly terminateProcess: ProcessTerminator;
+  private readonly managedProcesses?: ManagedProcessRegistry;
+  private managedProcessId: string | null = null;
 
   constructor(config: AgentSessionConfig, options: ACPAgentSessionOptions) {
     this.provider = options.provider;
@@ -1492,6 +1510,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.waitForInitialCommands = options.waitForInitialCommands ?? false;
     this.initialCommandsWaitTimeoutMs = options.initialCommandsWaitTimeoutMs ?? 1500;
     this.extensionCommandsParser = options.extensionCommandsParser;
+    this.managedProcesses = options.managedProcesses;
   }
 
   get id(): string | null {
@@ -1503,6 +1522,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       const spawned = await this.spawnProcess();
       this.child = spawned.child;
       this.connection = spawned.connection;
+      await this.recordManagedProcess(spawned);
       this.agentCapabilities = spawned.initialize.agentCapabilities ?? null;
 
       const response = await this.runACPRequest(() =>
@@ -1537,6 +1557,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       const spawned = await this.spawnProcess();
       this.child = spawned.child;
       this.connection = spawned.connection;
+      await this.recordManagedProcess(spawned);
       this.agentCapabilities = spawned.initialize.agentCapabilities ?? null;
       this.sessionId = handle.sessionId;
       this.bootstrapThreadEventPending = true;
@@ -2221,11 +2242,50 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     if (this.child) {
       await this.terminateProcess(this.child, { gracefulTimeoutMs: 2_000, forceTimeoutMs: 2_000 });
     }
+    if (this.managedProcessId && this.managedProcesses) {
+      try {
+        await this.managedProcesses.remove(this.managedProcessId);
+      } catch (error) {
+        this.logger.warn(
+          { err: error, id: this.managedProcessId },
+          "Failed to remove ACP provider process record",
+        );
+      }
+      this.managedProcessId = null;
+    }
 
     this.subscribers.clear();
     this.connection = null;
     this.child = null;
     this.activeForegroundTurnId = null;
+  }
+
+  private async recordManagedProcess(spawned: SpawnedACPProcess): Promise<void> {
+    if (!this.managedProcesses || typeof spawned.child.pid !== "number" || spawned.child.pid <= 0) {
+      return;
+    }
+
+    const processGroupId = getProcessGroupId(spawned.child);
+    try {
+      const record = await this.managedProcesses.record({
+        owner: { provider: this.provider, kind: "agent-process" },
+        pid: spawned.child.pid,
+        ...(processGroupId ? { processGroupId } : {}),
+        command: spawned.command ?? this.defaultCommand[0],
+        args: spawned.args ?? this.defaultCommand.slice(1),
+        metadata: this.agentId ? { agentId: this.agentId } : {},
+      });
+      this.managedProcessId = record.id;
+      if (this.closed) {
+        await this.managedProcesses.remove(record.id);
+        this.managedProcessId = null;
+      }
+    } catch (error) {
+      this.logger.warn(
+        { err: error, pid: spawned.child.pid, provider: this.provider },
+        "Failed to record ACP provider process",
+      );
+    }
   }
 
   async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
@@ -2324,7 +2384,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         provider: this.provider,
         sessionId: typeof params.sessionId === "string" ? params.sessionId : undefined,
         method,
-        rawEvent: params,
+        parameterKeys: Object.keys(params).sort(),
       },
       "provider.acp.extension_notification",
     );
@@ -2483,6 +2543,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     const args = [...prefix.args, ...this.defaultCommand.slice(1)];
     const child = spawnProcess(command, args, {
       cwd: this.config.cwd,
+      processGroupOwnership: true,
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
         overlays: [this.launchEnv],

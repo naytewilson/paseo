@@ -110,6 +110,46 @@ async function waitForFixtureReady(childPidPath: string): Promise<void> {
   );
 }
 
+async function waitForOwnerExitWithDescendantAlive(): Promise<void> {
+  await waitFor(
+    () => !isProcessRunning(ownerProcess?.pid ?? -1) && isProcessRunning(descendantPid ?? -1),
+    5000,
+    "owner did not exit while its descendant remained running",
+  );
+}
+
+function spawnExitingOwnerWithDescendant(childPidPath: string): ChildProcess {
+  const owner = spawn(
+    process.execPath,
+    [
+      "-e",
+      `
+        const { spawn } = require("node:child_process");
+        const child = spawn(process.execPath, [
+          "-e",
+          ${JSON.stringify(`
+            const fs = require("node:fs");
+            fs.writeFileSync(${JSON.stringify(childPidPath)}, String(process.pid));
+            if (process.send) process.send("ready");
+            process.on("SIGTERM", () => {});
+            setInterval(() => {}, 1000);
+          `)},
+        ], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+        child.unref();
+        child.on("message", (message) => {
+          if (message === "ready") setTimeout(() => process.exit(0), 100);
+        });
+      `,
+    ],
+    { detached: true, stdio: "ignore" },
+  );
+
+  // A detached launcher is the process-group leader. The production spawn
+  // wrapper records this same identity for provider-owned processes.
+  Object.defineProperty(owner, "processGroupId", { value: owner.pid });
+  return owner;
+}
+
 async function expectOwnerAndDescendantStopped(message: string): Promise<void> {
   await waitFor(
     () => !isProcessRunning(ownerProcess?.pid ?? -1) && !isProcessRunning(descendantPid ?? -1),
@@ -178,6 +218,29 @@ describe("terminateWithTreeKill", () => {
       expect(result).toBe("killed");
       await expectOwnerAndDescendantStopped(
         "owner or separate-process-group descendant survived terminateWithTreeKill",
+      );
+    },
+  );
+
+  test.runIf(process.platform !== "win32")(
+    "reaps a descendant after its launcher exits first",
+    async () => {
+      tempDir = await mkdtemp(join(tmpdir(), "paseo-server-tree-kill-reparent-"));
+      const childPidPath = join(tempDir, "descendant.pid");
+
+      ownerProcess = spawnExitingOwnerWithDescendant(childPidPath);
+      expect(ownerProcess.pid).toBeTypeOf("number");
+      await waitForFixtureReady(childPidPath);
+      await waitForOwnerExitWithDescendantAlive();
+
+      const result = await terminateWithTreeKill(ownerProcess, {
+        gracefulTimeoutMs: 100,
+        forceTimeoutMs: 2000,
+      });
+
+      expect(result).toBe("killed");
+      await expectOwnerAndDescendantStopped(
+        "reparented provider descendant survived launcher-first cleanup",
       );
     },
   );

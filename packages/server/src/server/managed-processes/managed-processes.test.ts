@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -13,8 +14,9 @@ import {
   type ManagedProcessSnapshot,
   type ManagedProcessTable,
 } from "./managed-processes.js";
-import { spawnProcess } from "../../utils/spawn.js";
+import { getProcessGroupId, spawnProcess } from "../../utils/spawn.js";
 import {
+  isProcessGroupAlive,
   terminateWithTreeKill,
   type ProcessTerminator,
   type TreeKillTarget,
@@ -272,6 +274,119 @@ describe("managed process termination", () => {
     expect(result).toBe("terminated");
     expect(forced).toBe(false);
   });
+
+  test.runIf(process.platform !== "win32")(
+    "startup reconciliation reaps an owned group after its launcher exits",
+    async () => {
+      tempHome = await mkdtemp(path.join(tmpdir(), "paseo-managed-process-group-"));
+      const descendantPidPath = path.join(tempHome, "descendant.pid");
+      let launcherPid: number | undefined;
+      let descendantPid: number | undefined;
+
+      const isRunning = (pid: number | undefined): boolean => {
+        if (!pid || pid <= 0) return false;
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const waitFor = async (check: () => boolean, message: string): Promise<void> => {
+        const deadline = Date.now() + 5000;
+        while (!check()) {
+          if (Date.now() >= deadline) throw new Error(message);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      };
+
+      try {
+        const launcherArgs = [
+          "-e",
+          `
+            const { spawn } = require("node:child_process");
+            const child = spawn(process.execPath, [
+              "-e",
+              ${JSON.stringify(`
+                const fs = require("node:fs");
+                fs.writeFileSync(${JSON.stringify(descendantPidPath)}, String(process.pid));
+                setInterval(() => {}, 1000);
+              `)},
+            ], { stdio: "ignore" });
+            child.unref();
+            setTimeout(() => process.exit(0), 100);
+          `,
+        ];
+        const launcher = spawnProcess(process.execPath, launcherArgs, {
+          processGroupOwnership: true,
+          stdio: "ignore",
+        });
+        launcherPid = launcher.pid ?? undefined;
+        await waitFor(
+          () => existsSync(descendantPidPath),
+          "owned process-group fixture did not publish its descendant pid",
+        );
+        descendantPid = Number.parseInt(await readFile(descendantPidPath, "utf8"), 10);
+        const processGroupId = getProcessGroupId(launcher);
+        if (!launcherPid || !processGroupId || !descendantPid) {
+          throw new Error("owned process-group fixture did not expose its identities");
+        }
+
+        const registry = createManagedProcessRegistry({
+          paseoHome: tempHome,
+          processTable: createSystemManagedProcessTable(),
+          terminateProcess: terminateWithTreeKill,
+          logger: createTestLogger(),
+        });
+        await registry.record({
+          owner: { provider: "test-provider", kind: "agent-process" },
+          pid: launcherPid,
+          processGroupId,
+          command: process.execPath,
+          args: launcherArgs,
+        });
+
+        await waitFor(
+          () => !isRunning(launcherPid) && isRunning(descendantPid),
+          "owned launcher did not exit before its descendant",
+        );
+        expect(isProcessGroupAlive(processGroupId)).toBe(true);
+
+        const restartedRegistry = createManagedProcessRegistry({
+          paseoHome: tempHome,
+          processTable: createSystemManagedProcessTable(),
+          terminateProcess: terminateWithTreeKill,
+          logger: createTestLogger(),
+        });
+        expect(await restartedRegistry.list()).toMatchObject([{ processGroupId }]);
+        const result = await restartedRegistry.reapStale();
+
+        expect(result).toMatchObject({
+          checked: 1,
+          dead: 1,
+          removed: 1,
+          terminated: 1,
+          errors: [],
+        });
+        await waitFor(
+          () => !isRunning(descendantPid),
+          "startup reconciliation left an owned descendant running",
+        );
+        expect(await restartedRegistry.list()).toEqual([]);
+      } finally {
+        for (const pid of [launcherPid, descendantPid]) {
+          if (isRunning(pid)) {
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch {
+              // Ignore cleanup races.
+            }
+          }
+        }
+      }
+    },
+  );
 });
 
 describe("system managed process table", () => {

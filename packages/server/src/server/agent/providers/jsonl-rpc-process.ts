@@ -64,6 +64,7 @@ function assertChildWithPipes(
 function spawnJsonlRpcProcess(launch: JsonlRpcLaunch): ChildProcessWithoutNullStreams {
   const child = spawnProcess(launch.command, launch.args, {
     cwd: launch.cwd,
+    processGroupOwnership: true,
     envOverlay: launch.env,
     stdio: ["pipe", "pipe", "pipe"],
   });

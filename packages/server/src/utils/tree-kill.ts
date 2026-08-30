@@ -2,6 +2,8 @@ import treeKill from "tree-kill";
 
 export interface TreeKillTarget {
   pid?: number;
+  /** POSIX process group that owns this provider tree, if one was created. */
+  processGroupId?: number | null;
   exitCode?: number | null;
   signalCode?: NodeJS.Signals | null;
   kill(signal?: NodeJS.Signals | number): boolean;
@@ -33,11 +35,12 @@ export async function terminateWithTreeKill(
   child: TreeKillTarget,
   options: TerminateWithTreeKillOptions,
 ): Promise<TerminateWithTreeKillResult> {
-  if (isProcessExited(child)) {
+  const processGroupId = getOwnedProcessGroupId(child);
+  if (isProcessExited(child) && !isProcessGroupAlive(processGroupId)) {
     return "already-exited";
   }
 
-  const exitPromise = waitForProcessExit(child);
+  const exitPromise = waitForTargetExit(child, processGroupId);
   await signalProcessTree(child, options.gracefulSignal ?? "SIGTERM");
   if (await waitForExitOrTimeout(exitPromise, options.gracefulTimeoutMs)) {
     return "terminated";
@@ -54,6 +57,12 @@ export async function terminateWithTreeKill(
 }
 
 export function signalProcessTree(child: TreeKillTarget, signal: NodeJS.Signals): Promise<void> {
+  const processGroupId = getOwnedProcessGroupId(child);
+  if (processGroupId !== null) {
+    signalProcessGroup(child, processGroupId, signal);
+    return Promise.resolve();
+  }
+
   if (isProcessExited(child)) {
     return Promise.resolve();
   }
@@ -72,6 +81,22 @@ export function signalProcessTree(child: TreeKillTarget, signal: NodeJS.Signals)
       resolve();
     });
   });
+}
+
+function signalProcessGroup(
+  child: TreeKillTarget,
+  processGroupId: number,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    process.kill(-processGroupId, signal);
+  } catch {
+    // The group may have disappeared between inspection and signalling. If the
+    // launcher is still alive, retain the direct-child fallback.
+    if (!isProcessExited(child)) {
+      signalDirectChild(child, signal);
+    }
+  }
 }
 
 function signalDirectChild(child: TreeKillTarget, signal: NodeJS.Signals): void {
@@ -100,6 +125,63 @@ function waitForProcessExit(child: TreeKillTarget): Promise<void> {
   return new Promise((resolve) => {
     child.once?.("exit", resolve);
   });
+}
+
+function waitForTargetExit(child: TreeKillTarget, processGroupId: number | null): Promise<void> {
+  if (processGroupId === null) {
+    return waitForProcessExit(child);
+  }
+  return waitForProcessGroupExit(processGroupId);
+}
+
+function waitForProcessGroupExit(processGroupId: number): Promise<void> {
+  if (!isProcessGroupAlive(processGroupId)) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const poll = (): void => {
+      if (!isProcessGroupAlive(processGroupId)) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(poll, 50);
+      timer.unref();
+    };
+    poll();
+  });
+}
+
+function getOwnedProcessGroupId(child: TreeKillTarget): number | null {
+  if (process.platform === "win32") {
+    return null;
+  }
+  const processGroupId = child.processGroupId;
+  return typeof processGroupId === "number" &&
+    Number.isInteger(processGroupId) &&
+    processGroupId > 0
+    ? processGroupId
+    : null;
+}
+
+export function isProcessGroupAlive(processGroupId: number | null | undefined): boolean {
+  if (
+    process.platform === "win32" ||
+    typeof processGroupId !== "number" ||
+    !Number.isInteger(processGroupId) ||
+    processGroupId <= 0
+  ) {
+    return false;
+  }
+
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    return (
+      error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EPERM"
+    );
+  }
 }
 
 async function waitForExitOrTimeout(

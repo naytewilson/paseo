@@ -5,7 +5,11 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { writeJsonFileAtomic } from "../atomic-file.js";
 import { execCommand } from "../../utils/spawn.js";
-import type { ProcessTerminator, TreeKillTarget } from "../../utils/tree-kill.js";
+import {
+  isProcessGroupAlive,
+  type ProcessTerminator,
+  type TreeKillTarget,
+} from "../../utils/tree-kill.js";
 
 const MANAGED_PROCESS_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 const MANAGED_PROCESS_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
@@ -21,6 +25,7 @@ const ManagedProcessRecordSchema = z.object({
     kind: z.string().min(1),
   }),
   pid: z.number().int().positive(),
+  processGroupId: z.number().int().positive().optional(),
   command: z.string().min(1),
   args: z.array(z.string()),
   metadata: z.record(z.string(), z.unknown()).default({}),
@@ -64,6 +69,7 @@ export interface ManagedProcessOwner {
 export interface ManagedProcessRecordInput {
   owner: ManagedProcessOwner;
   pid: number;
+  processGroupId?: number;
   command: string;
   args: string[];
   metadata?: Record<string, unknown>;
@@ -226,6 +232,7 @@ class FileBackedManagedProcessRegistry implements ManagedProcessRegistry {
       id: randomUUID(),
       owner: input.owner,
       pid: input.pid,
+      ...(input.processGroupId ? { processGroupId: input.processGroupId } : {}),
       command: input.command,
       args: input.args,
       metadata: input.metadata ?? {},
@@ -264,6 +271,9 @@ class FileBackedManagedProcessRegistry implements ManagedProcessRegistry {
       try {
         const inspection = await this.processTable.inspect(entry.record.pid);
         if (inspection.status === "not-found") {
+          if (await this.terminateDetachedProcessGroup(entry.record)) {
+            result.terminated += 1;
+          }
           await fs.rm(entry.path, { force: true });
           result.dead += 1;
           result.removed += 1;
@@ -297,20 +307,10 @@ class FileBackedManagedProcessRegistry implements ManagedProcessRegistry {
           continue;
         }
 
-        await this.terminateProcess(createPidTarget(entry.record.pid), {
-          gracefulTimeoutMs: MANAGED_PROCESS_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
-          forceTimeoutMs: MANAGED_PROCESS_FORCE_SHUTDOWN_TIMEOUT_MS,
-          onForceSignal: () => {
-            this.logger.warn(
-              {
-                pid: entry.record.pid,
-                owner: entry.record.owner,
-                timeoutMs: MANAGED_PROCESS_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
-              },
-              "Managed helper process did not exit after SIGTERM; sending SIGKILL",
-            );
-          },
-        });
+        await this.terminateProcess(
+          createPidTarget(entry.record.pid, entry.record.processGroupId),
+          buildTerminationOptions(this.logger, entry.record),
+        );
         await fs.rm(entry.path, { force: true });
         result.terminated += 1;
         result.removed += 1;
@@ -325,6 +325,17 @@ class FileBackedManagedProcessRegistry implements ManagedProcessRegistry {
     }
 
     return result;
+  }
+
+  private async terminateDetachedProcessGroup(record: ManagedProcessRecord): Promise<boolean> {
+    if (!isProcessGroupAlive(record.processGroupId)) {
+      return false;
+    }
+    const termination = await this.terminateProcess(
+      createPidTarget(record.pid, record.processGroupId),
+      buildTerminationOptions(this.logger, record),
+    );
+    return termination !== "already-exited";
   }
 
   private recordPath(id: string): string {
@@ -404,9 +415,34 @@ function normalizeCommandLine(commandLine: string): string {
   return commandLine.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-export function createPidTarget(pid: number): TreeKillTarget {
+function buildTerminationOptions(
+  logger: Logger,
+  record: Pick<ManagedProcessRecord, "pid" | "owner">,
+): {
+  gracefulTimeoutMs: number;
+  forceTimeoutMs: number;
+  onForceSignal: () => void;
+} {
+  return {
+    gracefulTimeoutMs: MANAGED_PROCESS_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
+    forceTimeoutMs: MANAGED_PROCESS_FORCE_SHUTDOWN_TIMEOUT_MS,
+    onForceSignal: () => {
+      logger.warn(
+        {
+          pid: record.pid,
+          owner: record.owner,
+          timeoutMs: MANAGED_PROCESS_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
+        },
+        "Managed helper process did not exit after SIGTERM; sending SIGKILL",
+      );
+    },
+  };
+}
+
+export function createPidTarget(pid: number, processGroupId?: number | null): TreeKillTarget {
   return {
     pid,
+    processGroupId: processGroupId ?? null,
     exitCode: null,
     signalCode: null,
     kill(signal?: NodeJS.Signals | number) {

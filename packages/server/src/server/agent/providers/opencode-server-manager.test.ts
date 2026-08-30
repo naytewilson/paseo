@@ -293,6 +293,7 @@ describe("OpenCodeServerManager managed process ledger", () => {
         id: "managed-process-1",
         owner: { provider: "opencode", kind: "helper-server" },
         pid: 14601,
+        processGroupId: 14601,
         command: "opencode",
         args: ["serve", "--port", "4601"],
         metadata: { port: 4601 },
@@ -304,6 +305,18 @@ describe("OpenCodeServerManager managed process ledger", () => {
     runtime.processForPort(4601).exitNormally();
     await runtime.settle();
 
+    await vi.waitFor(() => expect(runtime.terminatedPorts).toEqual([4601]));
+    expect(await runtime.managedProcesses.list()).toEqual([]);
+  });
+
+  test("reaps the owned process group after the launcher exits first", async () => {
+    const { manager, runtime } = createTestManager([4604]);
+
+    await manager.acquireCurrent();
+    runtime.processForPort(4604).exitNormally();
+    await runtime.settle();
+
+    await vi.waitFor(() => expect(runtime.terminatedPorts).toEqual([4604]));
     expect(await runtime.managedProcesses.list()).toEqual([]);
   });
 
@@ -474,7 +487,9 @@ class FakeOpenCodeServerRuntime {
   readonly terminateProcess: ProcessTerminator = async (target: TreeKillTarget) => {
     const process = this.processForChild(target as ChildProcess);
     this.terminatedPorts.push(process.port);
-    process.exitBySignal("SIGTERM");
+    if (process.exitCode === null && process.signalCode === null) {
+      process.exitBySignal("SIGTERM");
+    }
     return "terminated";
   };
 
@@ -514,6 +529,10 @@ class FakeOpenCodeProcess extends EventEmitter {
     super();
     this.port = options.port;
     this.pid = options.pid;
+    Object.defineProperty(this, "processGroupId", {
+      value: options.pid,
+      writable: false,
+    });
     this.child = this as unknown as ChildProcess;
   }
 

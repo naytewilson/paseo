@@ -113,6 +113,90 @@ function createSupervisorLogStream(options: SupervisorLogFileOptions | undefined
   });
 }
 
+const SENSITIVE_PROVIDER_VALUE =
+  /(\b(?:password|passwd|token|access[_-]?token|api[_-]?key|authorization)\b\s*[:=]\s*)(["']?)[^\s,;}"']+\2/gi;
+const BEARER_PROVIDER_VALUE = /(\bBearer\s+)[^\s,;}"']+/gi;
+const MAX_PROVIDER_LOG_MESSAGE_LENGTH = 16_384;
+const SENSITIVE_PROVIDER_KEYS = new Set([
+  "password",
+  "passwd",
+  "token",
+  "accesstoken",
+  "apikey",
+  "authorization",
+  "clientsecret",
+  "idtoken",
+  "privatekey",
+  "refreshtoken",
+  "refreshsecret",
+  "secret",
+  "secretkey",
+  "sessiontoken",
+  "cookie",
+]);
+
+function redactStructuredProviderValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactStructuredProviderValue(item));
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  const redacted: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    const normalizedKey = key.toLowerCase().replaceAll("-", "").replaceAll("_", "");
+    redacted[key] = SENSITIVE_PROVIDER_KEYS.has(normalizedKey)
+      ? "[REDACTED]"
+      : redactStructuredProviderValue(nested);
+  }
+  return redacted;
+}
+
+function redactProviderLogText(value: string): string {
+  let redacted = value.replace(BEARER_PROVIDER_VALUE, "$1[REDACTED]");
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed !== null && typeof parsed === "object") {
+      redacted = JSON.stringify(redactStructuredProviderValue(parsed));
+    }
+  } catch {
+    // Provider output is commonly text; continue with the text redaction path.
+  }
+  return redacted
+    .replace(SENSITIVE_PROVIDER_VALUE, "$1[REDACTED]")
+    .replace(BEARER_PROVIDER_VALUE, "$1[REDACTED]")
+    .slice(0, MAX_PROVIDER_LOG_MESSAGE_LENGTH);
+}
+
+function createProviderLogOptions(options: SupervisorLogFileOptions): SupervisorLogFileOptions {
+  return {
+    ...options,
+    path: `${options.path}.providers`,
+  };
+}
+
+type ProviderStreamName = "stdout" | "stderr";
+type ProviderOutputRemainders = Record<ProviderStreamName, string>;
+
+function parseProviderOutputContext(line: string): {
+  message: string;
+  provider?: string;
+  agentId?: string;
+  processId?: number;
+} {
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    const message = typeof parsed.msg === "string" ? parsed.msg : line;
+    const provider = typeof parsed.provider === "string" ? parsed.provider : undefined;
+    const agentId = typeof parsed.agentId === "string" ? parsed.agentId : undefined;
+    const processId = typeof parsed.pid === "number" ? parsed.pid : undefined;
+    return { message, provider, agentId, processId };
+  } catch {
+    return { message: line };
+  }
+}
+
 export function runSupervisor(options: SupervisorOptions): SupervisorController {
   const restartOnCrash = options.restartOnCrash ?? false;
   const workerArgs = options.workerArgs ?? process.argv.slice(2);
@@ -126,13 +210,12 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
   let exiting = false;
   let forceKillTimer: NodeJS.Timeout | null = null;
   const logStream = createSupervisorLogStream(options.logFile);
-
-  const writeDurableChunk = (chunk: string | Buffer): void => {
-    logStream?.write(chunk);
-  };
+  const providerLogStream = options.logFile
+    ? createSupervisorLogStream(createProviderLogOptions(options.logFile))
+    : null;
 
   const writeLifecycleLog = (message: string, fields: Record<string, unknown> = {}): void => {
-    writeDurableChunk(
+    logStream?.write(
       `${JSON.stringify({
         level: "info",
         time: new Date().toISOString(),
@@ -149,14 +232,76 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
     writeLifecycleLog(message);
   };
 
-  const closeLogStream = (): Promise<void> =>
+  const closeStream = (stream: ReturnType<typeof createSupervisorLogStream>): Promise<void> =>
     new Promise((resolve) => {
-      if (!logStream) {
+      if (!stream) {
         resolve();
         return;
       }
-      logStream.end(resolve);
+      stream.end(resolve);
     });
+
+  const closeLogStreams = async (): Promise<void> => {
+    await Promise.all([closeStream(logStream), closeStream(providerLogStream)]);
+  };
+
+  const writeProviderLine = (
+    line: string,
+    streamName: ProviderStreamName,
+    workerPid: number | null,
+  ): void => {
+    if (!providerLogStream) {
+      return;
+    }
+    const context = parseProviderOutputContext(line);
+    providerLogStream.write(
+      `${JSON.stringify({
+        level: "info",
+        time: new Date().toISOString(),
+        pid: process.pid,
+        name: options.name,
+        stream: streamName,
+        workerPid,
+        ...(context.provider ? { provider: context.provider } : {}),
+        ...(context.agentId ? { agentId: context.agentId } : {}),
+        ...(context.processId ? { processId: context.processId } : {}),
+        message: redactProviderLogText(context.message),
+      })}\n`,
+    );
+  };
+
+  const writeProviderChunk = (
+    chunk: string | Buffer,
+    streamName: ProviderStreamName,
+    workerPid: number | null,
+    remainders: ProviderOutputRemainders,
+  ): void => {
+    const complete = `${remainders[streamName]}${chunk.toString()}`;
+    const lines = complete.split(/\r?\n/);
+    remainders[streamName] = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line) {
+        writeProviderLine(line, streamName, workerPid);
+      }
+    }
+    if (remainders[streamName].length > MAX_PROVIDER_LOG_MESSAGE_LENGTH) {
+      const overflow = remainders[streamName].slice(0, MAX_PROVIDER_LOG_MESSAGE_LENGTH);
+      remainders[streamName] = "";
+      writeProviderLine(overflow, streamName, workerPid);
+    }
+  };
+
+  const flushProviderRemainder = (
+    streamName: ProviderStreamName,
+    workerPid: number | null,
+    remainders: ProviderOutputRemainders,
+  ): void => {
+    const remainder = remainders[streamName];
+    remainders[streamName] = "";
+    if (remainder) {
+      writeProviderLine(remainder, streamName, workerPid);
+    }
+  };
 
   const exitSupervisor = (code: number): void => {
     if (exiting) {
@@ -168,7 +313,7 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
         const message = error instanceof Error ? error.message : String(error);
         log(`Supervisor exit cleanup failed: ${message}`);
       })
-      .then(closeLogStream)
+      .then(closeLogStreams)
       .finally(() => {
         process.exit(code);
       });
@@ -236,6 +381,7 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
     }
 
     const currentChild = child;
+    const providerOutputRemainders: ProviderOutputRemainders = { stdout: "", stderr: "" };
     const heartbeat = setInterval(() => {
       const message: SupervisorHeartbeatMessage = { type: "paseo:supervisor-heartbeat" };
       if (currentChild.connected) {
@@ -258,12 +404,12 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
 
     child.stdout?.on("data", (chunk: Buffer) => {
       process.stdout.write(chunk);
-      writeDurableChunk(chunk);
+      writeProviderChunk(chunk, "stdout", currentChild.pid ?? null, providerOutputRemainders);
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
       process.stderr.write(chunk);
-      writeDurableChunk(chunk);
+      writeProviderChunk(chunk, "stderr", currentChild.pid ?? null, providerOutputRemainders);
     });
 
     child.on("message", (msg: unknown) => {
@@ -298,6 +444,8 @@ export function runSupervisor(options: SupervisorOptions): SupervisorController 
     child.on("exit", (code, signal) => {
       clearInterval(heartbeat);
       clearForceKillTimer();
+      flushProviderRemainder("stdout", currentChild.pid ?? null, providerOutputRemainders);
+      flushProviderRemainder("stderr", currentChild.pid ?? null, providerOutputRemainders);
       const exitDescriptor = describeExit(code, signal);
       writeLifecycleLog("Worker exited", { code, signal, exit: exitDescriptor });
 

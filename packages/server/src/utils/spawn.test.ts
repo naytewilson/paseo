@@ -159,6 +159,20 @@ describe("execCommand", () => {
     });
   });
 
+  test.runIf(process.platform !== "win32")(
+    "records the dedicated process group for an owned launch",
+    async () => {
+      const child = spawnProcess(process.execPath, ["-e", "setTimeout(() => {}, 1000)"], {
+        processGroupOwnership: true,
+        stdio: "ignore",
+      });
+
+      expect(child.processGroupId).toBe(child.pid);
+      child.kill("SIGKILL");
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    },
+  );
+
   test("internal env mode preserves Paseo-owned launcher env", async () => {
     const result = await execCommand(process.execPath, ["-e", printEnvScript], {
       envMode: "internal",

@@ -503,9 +503,16 @@ const HELLO_TIMEOUT_MS = 15_000;
 const WS_CLOSE_HELLO_TIMEOUT = 4001;
 const WS_CLOSE_INVALID_HELLO = 4002;
 const WS_CLOSE_INCOMPATIBLE_PROTOCOL = 4003;
+const WS_CLOSE_PENDING_CONNECTION_LIMIT = 4004;
 const WS_CLOSE_SERVER_SHUTDOWN = 1001;
 const WS_PROTOCOL_VERSION = 1;
 const WS_RUNTIME_METRICS_FLUSH_MS = 30_000;
+
+// Keep the WebSocket parser bounded even though file transfers use binary
+// frames. File-transfer callers chunk their payloads, so this remains large
+// enough for a control frame while avoiding ws's much larger default.
+export const MAX_WS_PAYLOAD_BYTES = 16 * 1024 * 1024;
+export const MAX_PENDING_CONNECTIONS = 64;
 
 export class MissingDaemonVersionError extends Error {
   constructor() {
@@ -809,6 +816,7 @@ export class VoiceAssistantWebSocketServer {
     const wss = new WebSocketServer({
       server,
       path: "/ws",
+      maxPayload: MAX_WS_PAYLOAD_BYTES,
       handleProtocols: (protocols) => selectWebSocketProtocol(protocols, password),
       verifyClient: ({ req }, callback) => {
         this.verifyWsUpgrade(
@@ -1276,6 +1284,19 @@ export class VoiceAssistantWebSocketServer {
     ) {
       try {
         ws.close(WS_CLOSE_SERVER_SHUTDOWN, "Server shutting down");
+      } catch {
+        // ignore close errors
+      }
+      return;
+    }
+
+    if (this.pendingConnections.size >= MAX_PENDING_CONNECTIONS) {
+      this.logger.warn(
+        { maxPendingConnections: MAX_PENDING_CONNECTIONS },
+        "Closing connection because the pre-hello connection limit is full",
+      );
+      try {
+        ws.close(WS_CLOSE_PENDING_CONNECTION_LIMIT, "Too many pending connections");
       } catch {
         // ignore close errors
       }

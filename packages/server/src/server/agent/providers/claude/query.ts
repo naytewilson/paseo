@@ -91,6 +91,7 @@ function applyRuntimeSettingsToClaudeOptions(
           : providerEnvSpec),
         signal: spawnOptions.signal,
         stdio: ["pipe", "pipe", "pipe"],
+        processGroupOwnership: true,
         // Bypass cmd.exe on Windows: the SDK passes --mcp-config with inline JSON
         // containing double quotes, which cmd.exe mangles (strips quotes, breaks parsing).
         // The command is always a resolved binary path, so shell routing is unnecessary.

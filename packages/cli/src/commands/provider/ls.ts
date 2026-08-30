@@ -23,8 +23,8 @@ const PROVIDERS: ProviderListItem[] = AGENT_PROVIDER_DEFINITIONS.map((def) => ({
   modes: def.modes.length > 0 ? def.modes.map((m) => m.label).join(", ") : "-",
 }));
 
-function getStaticProviders(): ProviderListItem[] {
-  return PROVIDERS;
+function getOfflineProviders(): ProviderListItem[] {
+  return PROVIDERS.map((provider) => Object.assign({}, provider, { status: "unknown" }));
 }
 
 /** Schema for provider ls output */
@@ -64,7 +64,7 @@ export async function runLsCommand(
   if (!client) {
     return {
       type: "list",
-      data: getStaticProviders(),
+      data: getOfflineProviders(),
       schema: providerLsSchema,
     };
   }
@@ -86,7 +86,7 @@ export async function runLsCommand(
   } catch {
     return {
       type: "list",
-      data: getStaticProviders(),
+      data: getOfflineProviders(),
       schema: providerLsSchema,
     };
   } finally {
