@@ -1249,6 +1249,12 @@ export class ACPAgentClient implements AgentClient {
         return { outcome: { outcome: "cancelled" } };
       },
       async sessionUpdate(): Promise<void> {},
+      async extNotification(method, params) {
+        logger.trace(
+          { provider, method, parameterKeys: Object.keys(params).sort() },
+          "provider.acp.probe_extension_notification",
+        );
+      },
       async extMethod(method, params) {
         logger.trace(
           { provider, method, parameterKeys: Object.keys(params).sort() },

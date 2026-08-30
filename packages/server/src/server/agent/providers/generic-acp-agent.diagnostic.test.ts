@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { runProviderRefreshWithDeadline } from "../provider-refresh-deadline.js";
@@ -32,8 +32,10 @@ describe("GenericACPAgentClient diagnostics", () => {
 
   test("reports command, binary, version command, and ACP phase rows", async () => {
     await withFakeACPAgent("success", async (scriptPath, mode) => {
+      const logger = createTestLogger();
+      const error = vi.spyOn(logger, "error");
       const client = new GenericACPAgentClient({
-        logger: createTestLogger(),
+        logger,
         command: [process.execPath, scriptPath, mode],
         providerId: "cursor",
         label: "Cursor",
@@ -54,6 +56,8 @@ describe("GenericACPAgentClient diagnostics", () => {
       expect(diagnostic).toContain("modes=1");
       expect(diagnostic).toContain("ACP cleanup: ok");
       expect(diagnostic).not.toContain("Status:");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(error).not.toHaveBeenCalled();
     });
   });
 
@@ -272,6 +276,28 @@ rl.on("line", (line) => {
       },
       configOptions: [],
     });
+    process.stdout.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "_kiro.dev/commands/available",
+        params: { sessionId: "session-1", commands: [] },
+      }) + "\\n",
+    );
+    process.stdout.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "_grok.dev/telemetry/updated",
+        params: { sessionId: "session-1", token: "probe-extension-test-sentinel" },
+      }) + "\\n",
+    );
+    process.stdout.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "extension-request-1",
+        method: "_kiro.dev/metadata",
+        params: { sessionId: "session-1", contextUsagePercentage: 1 },
+      }) + "\\n",
+    );
   }
 });
 `;
