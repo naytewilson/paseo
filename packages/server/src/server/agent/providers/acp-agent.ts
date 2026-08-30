@@ -384,6 +384,16 @@ export type ACPExtensionCommandsParser = (
   params: Record<string, unknown>,
 ) => AgentSlashCommand[] | null;
 
+// Some ACP providers send vendor requests to the client in addition to
+// notifications. Return a result for methods the provider owns, or null to
+// consume an extension request that has no Paseo-side semantics. The generic
+// client still returns an empty result for unhandled methods so a vendor
+// request cannot turn a successful probe into a noisy Method-not-found error.
+export type ACPExtensionMethodHandler = (
+  method: string,
+  params: Record<string, unknown>,
+) => Record<string, unknown> | null | Promise<Record<string, unknown> | null>;
+
 /**
  * Context handed to an {@link ACPCatalogModelResolver} during `fetchCatalog`. It exposes
  * the already-derived models plus the live probe session so a resolver can refine them
@@ -437,6 +447,7 @@ interface ACPAgentClientOptions {
   ) => Promise<void>;
   capabilities?: AgentCapabilityFlags;
   extensionCommandsParser?: ACPExtensionCommandsParser;
+  extensionMethodHandler?: ACPExtensionMethodHandler;
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
   terminateProcess?: ProcessTerminator;
@@ -468,6 +479,7 @@ interface ACPAgentSessionOptions {
   ) => Promise<void>;
   capabilities: AgentCapabilityFlags;
   extensionCommandsParser?: ACPExtensionCommandsParser;
+  extensionMethodHandler?: ACPExtensionMethodHandler;
   handle?: AgentPersistenceHandle;
   agentId?: string;
   launchEnv?: Record<string, string>;
@@ -833,6 +845,7 @@ export class ACPAgentClient implements AgentClient {
   private readonly waitForInitialCommands: boolean;
   private readonly initialCommandsWaitTimeoutMs: number;
   private readonly extensionCommandsParser?: ACPExtensionCommandsParser;
+  private readonly extensionMethodHandler?: ACPExtensionMethodHandler;
   protected readonly terminateProcess: ProcessTerminator;
   private readonly managedProcesses?: ManagedProcessRegistry;
 
@@ -862,6 +875,7 @@ export class ACPAgentClient implements AgentClient {
     this.waitForInitialCommands = options.waitForInitialCommands ?? false;
     this.initialCommandsWaitTimeoutMs = options.initialCommandsWaitTimeoutMs ?? 1500;
     this.extensionCommandsParser = options.extensionCommandsParser;
+    this.extensionMethodHandler = options.extensionMethodHandler;
     this.managedProcesses = options.managedProcesses;
   }
 
@@ -893,6 +907,7 @@ export class ACPAgentClient implements AgentClient {
         agentId: launchContext?.agentId,
         launchEnv: launchContext?.env,
         extensionCommandsParser: this.extensionCommandsParser,
+        extensionMethodHandler: this.extensionMethodHandler,
         waitForInitialCommands: this.waitForInitialCommands,
         initialCommandsWaitTimeoutMs: this.initialCommandsWaitTimeoutMs,
         managedProcesses: this.managedProcesses,
@@ -945,6 +960,7 @@ export class ACPAgentClient implements AgentClient {
       agentId: launchContext?.agentId,
       launchEnv: launchContext?.env,
       extensionCommandsParser: this.extensionCommandsParser,
+      extensionMethodHandler: this.extensionMethodHandler,
       waitForInitialCommands: this.waitForInitialCommands,
       initialCommandsWaitTimeoutMs: this.initialCommandsWaitTimeoutMs,
       managedProcesses: this.managedProcesses,
@@ -1226,11 +1242,20 @@ export class ACPAgentClient implements AgentClient {
   }
 
   protected buildProbeClient(): ACPClient {
+    const logger = this.logger;
+    const provider = this.provider;
     return {
       async requestPermission(): Promise<RequestPermissionResponse> {
         return { outcome: { outcome: "cancelled" } };
       },
       async sessionUpdate(): Promise<void> {},
+      async extMethod(method, params) {
+        logger.trace(
+          { provider, method, parameterKeys: Object.keys(params).sort() },
+          "provider.acp.probe_extension_method",
+        );
+        return {};
+      },
       async readTextFile(params: ReadTextFileRequest) {
         const content = await fs.readFile(params.path, "utf8");
         return { content };
@@ -1468,6 +1493,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private waitForInitialCommands: boolean;
   private initialCommandsWaitTimeoutMs: number;
   private readonly extensionCommandsParser?: ACPExtensionCommandsParser;
+  private readonly extensionMethodHandler?: ACPExtensionMethodHandler;
   private currentTurnUsage: AgentUsage | undefined;
   private activeForegroundTurnId: string | null = null;
   private fallbackAssistantMessageId: string | null = null;
@@ -1510,6 +1536,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.waitForInitialCommands = options.waitForInitialCommands ?? false;
     this.initialCommandsWaitTimeoutMs = options.initialCommandsWaitTimeoutMs ?? 1500;
     this.extensionCommandsParser = options.extensionCommandsParser;
+    this.extensionMethodHandler = options.extensionMethodHandler;
     this.managedProcesses = options.managedProcesses;
   }
 
@@ -2395,6 +2422,24 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         sessionId: typeof params.sessionId === "string" ? params.sessionId : undefined,
       });
     }
+  }
+
+  async extMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    this.logger.trace(
+      {
+        agentId: this.agentId,
+        provider: this.provider,
+        method,
+        parameterKeys: Object.keys(params).sort(),
+      },
+      "provider.acp.extension_method",
+    );
+
+    const result = await this.extensionMethodHandler?.(method, params);
+    return result ?? {};
   }
 
   // Cache an asynchronously-delivered slash-command batch and unblock any

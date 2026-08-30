@@ -2503,6 +2503,30 @@ describe("ACPAgentSession", () => {
     expect(JSON.stringify(trace.mock.calls)).not.toContain("extension-notification-test-sentinel");
   });
 
+  test("consumes vendor extension requests without a method-not-found error", async () => {
+    const logger = createTestLogger();
+    const error = vi.spyOn(logger, "error");
+    const trace = vi.spyOn(logger, "trace");
+    const session = createSessionWithConfig({ provider: "kiro" }, logger);
+
+    await expect(
+      session.extMethod("_kiro.dev/metadata", {
+        sessionId: "session-1",
+        token: "extension-request-test-sentinel",
+      }),
+    ).resolves.toEqual({});
+
+    await expect(
+      session.extMethod("_grok.dev/metadata", {
+        sessionId: "session-1",
+        token: "extension-request-test-sentinel",
+      }),
+    ).resolves.toEqual({});
+
+    expect(error).not.toHaveBeenCalled();
+    expect(JSON.stringify(trace.mock.calls)).not.toContain("extension-request-test-sentinel");
+  });
+
   test("maps the Kiro _kiro.dev/commands/available notification into slash commands and skills", async () => {
     const session = createKiroSession({
       waitForInitialCommands: true,
