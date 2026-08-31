@@ -59,7 +59,11 @@ import {
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
 import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
-import { reconcileMissingAgentStateWithPresentAgent } from "@/panels/agent-panel-load-state";
+import {
+  isChatAgentReadyForConversation,
+  reconcileMissingAgentStateWithPresentAgent,
+  resolveChatAgentRecord,
+} from "@/panels/agent-panel-load-state";
 import {
   reconcileReconnectToastState,
   type ReconnectToastState,
@@ -141,7 +145,7 @@ function resolveChatAgentFromSession(
 ): Agent | null {
   if (!agentId) return null;
   const session = state.sessions[serverId];
-  return session?.agents?.get(agentId) ?? session?.agentDetails?.get(agentId) ?? null;
+  return resolveChatAgentRecord(session?.agents?.get(agentId), session?.agentDetails?.get(agentId));
 }
 
 function readViewedTimelineError(input: {
@@ -630,6 +634,7 @@ function AgentPanelBody({
   const agentState = useSessionStore(
     useShallow((state) => selectChatAgentState(state, serverId, agentId)),
   );
+  const isAgentReadyForConversation = isChatAgentReadyForConversation(agentState);
   const [lookupState, setLookupState] = useState<AgentLookupState>({ tag: "idle" });
   const lookupAttemptTokenRef = useRef(0);
   const retryAgentLookup = useCallback(() => setLookupState({ tag: "idle" }), []);
@@ -645,7 +650,7 @@ function AgentPanelBody({
     if (!agentId) {
       return;
     }
-    if (agentState.id) {
+    if (isAgentReadyForConversation) {
       if (workspaceKey) {
         resolvePendingAgent(workspaceKey, agentId);
       }
@@ -704,7 +709,7 @@ function AgentPanelBody({
       });
   }, [
     agentId,
-    agentState.id,
+    isAgentReadyForConversation,
     client,
     hasSession,
     isConnected,
@@ -807,6 +812,7 @@ function ChatAgentContent({
   const agentState = useSessionStore(
     useShallow((state) => selectChatAgentState(state, serverId, agentId)),
   );
+  const isAgentReadyForConversation = isChatAgentReadyForConversation(agentState);
   const projectPlacement = useStoreWithEqualityFn(
     useSessionStore,
     (state) => {
@@ -1084,7 +1090,7 @@ function ChatAgentContent({
     if (agentState.archivedAt) {
       return;
     }
-    if (agentState.id && hasAppliedAuthoritativeHistory) {
+    if (isAgentReadyForConversation && hasAppliedAuthoritativeHistory) {
       if (
         missingAgentState.kind === "resolving" ||
         missingAgentState.kind === "not_found" ||
@@ -1121,9 +1127,11 @@ function ChatAgentContent({
           return;
         }
         const currentSession = useSessionStore.getState().sessions[serverId];
-        const currentAgent =
-          currentSession?.agents.get(agentId) ?? currentSession?.agentDetails.get(agentId);
-        if (!currentAgent) {
+        const currentAgent = resolveChatAgentRecord(
+          currentSession?.agents.get(agentId),
+          currentSession?.agentDetails.get(agentId),
+        );
+        if (!isChatAgentReadyForConversation(currentAgent)) {
           const result = await client.fetchAgent({ agentId });
           if (attemptToken !== initAttemptTokenRef.current) {
             return;
@@ -1155,7 +1163,7 @@ function ChatAgentContent({
         setMissingAgentState({ kind: "error", message });
       });
   }, [
-    agentState.id,
+    isAgentReadyForConversation,
     agentState.archivedAt,
     hasAppliedAuthoritativeHistory,
     agentId,
