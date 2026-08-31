@@ -15,21 +15,16 @@ import {
 import {
   BottomSheetBackdrop,
   BottomSheetScrollView,
-  KEYBOARD_STATUS,
-  useBottomSheetInternal,
   type BottomSheetBackgroundProps,
 } from "@gorhom/bottom-sheet";
-import Animated, { useAnimatedStyle } from "react-native-reanimated";
+import Animated from "react-native-reanimated";
 import { ArrowLeft, Search, X } from "lucide-react-native";
 import {
   IsolatedBottomSheetModal,
   type ContextBridge,
   useIsolatedBottomSheetVisibility,
 } from "@/components/ui/isolated-bottom-sheet-modal";
-import {
-  getBottomSheetVisibleContentHeight,
-  getCompactSheetSafeAreaPadding,
-} from "@/components/adaptive-modal-sheet-layout";
+import { getCompactSheetSafeAreaPadding } from "@/components/adaptive-modal-sheet-layout";
 import { isWeb } from "@/constants/platform";
 import { useKeyboardVisibility } from "@/hooks/use-keyboard-visibility";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -190,10 +185,6 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
     minHeight: 0,
   },
-  bottomSheetVisibleContent: {
-    minHeight: 0,
-    overflow: "hidden",
-  },
   bottomSheetVisibleScroll: {
     flex: 1,
     minHeight: 0,
@@ -244,40 +235,6 @@ function SheetBackground({ style }: BottomSheetBackgroundProps) {
  */
 function SheetContent({ style, children }: { style: StyleProp<ViewStyle>; children: ReactNode }) {
   return <View style={[styles.sheetContent, style]}>{children}</View>;
-}
-
-function BottomSheetVisibleContent({ children }: { children: ReactNode }) {
-  const { animatedDetentsState, animatedKeyboardState, animatedLayoutState, animatedPosition } =
-    useBottomSheetInternal();
-  const visibleContentStyle = useAnimatedStyle(() => {
-    const { containerHeight, handleHeight } = animatedLayoutState.get();
-    if (containerHeight < 0 || handleHeight < 0) {
-      return { height: 0 };
-    }
-
-    const initialDetentPosition = animatedDetentsState.get().detents?.[0];
-    const contentPosition =
-      initialDetentPosition == null
-        ? animatedPosition.get()
-        : Math.min(animatedPosition.get(), initialDetentPosition);
-
-    const keyboardState = animatedKeyboardState.get();
-    return {
-      height: getBottomSheetVisibleContentHeight({
-        containerHeight,
-        contentPosition,
-        handleHeight,
-        keyboardHeight: keyboardState.heightWithinContainer,
-        isKeyboardVisible: keyboardState.status === KEYBOARD_STATUS.SHOWN,
-      }),
-    };
-  }, [animatedDetentsState, animatedKeyboardState, animatedLayoutState, animatedPosition]);
-
-  return (
-    <Animated.View style={[styles.bottomSheetVisibleContent, visibleContentStyle]}>
-      {children}
-    </Animated.View>
-  );
 }
 
 export function SheetHeaderView({
@@ -653,11 +610,7 @@ export function AdaptiveModalSheet({
         accessible={false}
         presentation={presentation}
       >
-        {sizeContentToCurrentSnapPoint ? (
-          <BottomSheetVisibleContent>{sheetContent}</BottomSheetVisibleContent>
-        ) : (
-          sheetContent
-        )}
+        {sheetContent}
       </IsolatedBottomSheetModal>
     );
   }

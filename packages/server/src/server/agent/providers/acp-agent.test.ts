@@ -1169,7 +1169,7 @@ describe("ACPAgentSession Zed parity", () => {
     });
   });
 
-  test("preserves ACP chooser actions and returns the selected option", async () => {
+  test("maps ACP chooser requests to the native question form and returns its selected option", async () => {
     const session = createSessionWithConfig({
       provider: "kimi-acp",
       modeId: "https://agentclientprotocol.com/protocol/session-modes#agent",
@@ -1180,6 +1180,7 @@ describe("ACPAgentSession Zed parity", () => {
     session.subscribe((event) => events.push(event));
 
     const permission = session.requestPermission({
+      _meta: { "com.getpaseo.acp.question": true },
       sessionId: "session-1",
       toolCall: {
         toolCallId: "question-1",
@@ -1208,15 +1209,89 @@ describe("ACPAgentSession Zed parity", () => {
     expect(requested).toMatchObject({
       type: "permission_requested",
       request: {
-        detail: {
-          type: "plain_text",
-          label: "AskUserQuestion",
-          text: "Which path should Paseo take?",
+        kind: "question",
+        input: {
+          questions: [
+            {
+              header: "AskUserQuestion",
+              question: "Which path should Paseo take?",
+              options: [{ label: "Narrow fix" }, { label: "Protocol fix" }],
+              multiSelect: false,
+              allowOther: false,
+              allowEmpty: false,
+              dismissLabel: "Skip",
+            },
+          ],
         },
+      },
+    });
+    if (requested?.type !== "permission_requested") {
+      throw new Error("Expected permission request");
+    }
+
+    await expect(
+      session.respondToPermission(requested.request.id, {
+        behavior: "allow",
+      }),
+    ).rejects.toThrow("ACP question response does not match an available option");
+    expect(session.getPendingPermissions()).toHaveLength(1);
+
+    await expect(
+      session.respondToPermission(requested.request.id, {
+        behavior: "allow",
+        updatedInput: {
+          ...requested.request.input,
+          answers: { AskUserQuestion: "Not one of the choices" },
+        },
+      }),
+    ).rejects.toThrow("ACP question response does not match an available option");
+    expect(session.getPendingPermissions()).toHaveLength(1);
+
+    await session.respondToPermission(requested.request.id, {
+      behavior: "allow",
+      updatedInput: {
+        ...requested.request.input,
+        answers: { AskUserQuestion: "Protocol fix" },
+      },
+    });
+
+    await expect(permission).resolves.toEqual({
+      outcome: { outcome: "selected", optionId: "q0_opt_1" },
+    });
+  });
+
+  test("does not misclassify repeated ordinary ACP allow actions as a native question", async () => {
+    const session = createSessionWithConfig({ provider: "generic-acp" });
+    const events: AgentStreamEvent[] = [];
+
+    asInternals<ACPSessionInternals>(session).sessionId = "session-1";
+    session.subscribe((event) => events.push(event));
+
+    const permission = session.requestPermission({
+      sessionId: "session-1",
+      toolCall: {
+        toolCallId: "deploy-tool",
+        title: "Deploy release",
+        kind: "execute",
+        status: "pending",
+      },
+      options: [
+        { optionId: "deploy-now", name: "Deploy now", kind: "allow_once" },
+        { optionId: "deploy-dry-run", name: "Dry run", kind: "allow_once" },
+        { optionId: "deploy-reject", name: "Reject", kind: "reject_once" },
+      ],
+    } satisfies RequestPermissionRequest);
+
+    await Promise.resolve();
+    const requested = events.find((event) => event.type === "permission_requested");
+    expect(requested).toMatchObject({
+      type: "permission_requested",
+      request: {
+        kind: "tool",
         actions: [
-          { id: "q0_opt_0", label: "Narrow fix", behavior: "allow" },
-          { id: "q0_opt_1", label: "Protocol fix", behavior: "allow" },
-          { id: "q0_skip", label: "Skip", behavior: "deny" },
+          { id: "deploy-now", behavior: "allow" },
+          { id: "deploy-dry-run", behavior: "allow" },
+          { id: "deploy-reject", behavior: "deny" },
         ],
       },
     });
@@ -1226,11 +1301,10 @@ describe("ACPAgentSession Zed parity", () => {
 
     await session.respondToPermission(requested.request.id, {
       behavior: "allow",
-      selectedActionId: "q0_opt_1",
+      selectedActionId: "deploy-dry-run",
     });
-
     await expect(permission).resolves.toEqual({
-      outcome: { outcome: "selected", optionId: "q0_opt_1" },
+      outcome: { outcome: "selected", optionId: "deploy-dry-run" },
     });
   });
 
