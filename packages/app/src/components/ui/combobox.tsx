@@ -70,6 +70,7 @@ import {
   useWebOverlayRegistration,
 } from "@/lib/overlay-root";
 import { buildDesktopFrameStyle } from "./combobox-frame-style";
+import { readWebAnchorMeasurement } from "./combobox-anchor-measurement";
 
 export { buildDesktopFrameStyle } from "./combobox-frame-style";
 
@@ -723,6 +724,18 @@ function useAnchorMeasure(
     }
 
     const measure = () => {
+      if (IS_WEB) {
+        const webMeasurement = readWebAnchorMeasurement(referenceEl);
+        if (webMeasurement) {
+          applyMeasuredAnchor(
+            { setReferenceLeft, setReferenceTop, setReferenceWidth, setReferenceAtOrigin },
+            webMeasurement.x,
+            webMeasurement.y,
+            webMeasurement.width,
+          );
+          return;
+        }
+      }
       referenceEl.measureInWindow((x, y, width) => {
         applyMeasuredAnchor(
           { setReferenceLeft, setReferenceTop, setReferenceWidth, setReferenceAtOrigin },
