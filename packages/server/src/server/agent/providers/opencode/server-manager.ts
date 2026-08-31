@@ -348,7 +348,12 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       refCount: 0,
       retired: false,
       ready: Promise.resolve(),
-      events: this.createEventSource({ serverUrl: url, processExit, logger: this.logger }),
+      events: this.createEventSource({
+        serverUrl: url,
+        processExit,
+        logger: this.logger,
+        deferStart: true,
+      }),
       managedProcessRecord,
     };
     void managedProcessRecord.then((record) => {
@@ -442,14 +447,23 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       });
     });
 
-    server.ready = ready.catch(async (error) => {
-      await this.killServer(server);
-      if (this.currentServer === server) {
-        this.currentServer = null;
-      }
-      this.retiredServers.delete(server);
-      throw error;
-    });
+    server.ready = ready.then(
+      () => {
+        // HTTP readiness first: a `/global/event` connection opened while the
+        // helper is still initializing can be accepted but never emit its
+        // first record, stalling startup on the 30s stream watchdog.
+        server.events.start();
+        return undefined;
+      },
+      async (error) => {
+        await this.killServer(server);
+        if (this.currentServer === server) {
+          this.currentServer = null;
+        }
+        this.retiredServers.delete(server);
+        throw error;
+      },
+    );
 
     return server;
   }

@@ -60,6 +60,63 @@ describe("OpenCodeServerManager generations", () => {
     await new Promise<void>((resolve) => upstream.close(() => resolve()));
   });
 
+  test("opens the event stream only after the helper announces listening", async () => {
+    const responses: ServerResponse[] = [];
+    let requestCount = 0;
+    const upstream = createServer((_request, response) => {
+      requestCount += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.flushHeaders();
+      responses.push(response);
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("Missing upstream address");
+    const { manager, runtime } = createTestManager([address.port], { autoAnnounce: false });
+
+    const acquisitionPromise = manager.acquireCurrent();
+    await runtime.settle();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(requestCount).toBe(0);
+
+    runtime.processForPort(address.port).announceListening();
+    const acquisition = await acquisitionPromise;
+    await vi.waitFor(() => expect(requestCount).toBe(1));
+    responses[0]?.write(
+      `data: ${JSON.stringify({ directory: "/workspace", payload: { type: "server.connected", properties: {} } })}\n\n`,
+    );
+    await acquisition.events.ready();
+
+    await acquisition.release();
+    await manager.shutdown();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  });
+
+  test("startup failure before readiness never opens the event stream", async () => {
+    let requestCount = 0;
+    const upstream = createServer((_request, response) => {
+      requestCount += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.flushHeaders();
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("Missing upstream address");
+    const { manager, runtime } = createTestManager([address.port], { autoAnnounce: false });
+
+    const acquisition = manager.acquireCurrent();
+    await runtime.settle();
+    runtime.processForPort(address.port).exitNormally();
+
+    await expect(acquisition).rejects.toThrow("OpenCode server exited with code 0");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(requestCount).toBe(0);
+    expect(await runtime.managedProcesses.list()).toEqual([]);
+
+    await manager.shutdown();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  });
+
   test("uses an explicit base environment for the server process", async () => {
     const baseEnv = { HOME: "/isolated/home", PATH: "/isolated/bin" };
     const { manager, runtime } = createTestManager([4091], { baseEnv });

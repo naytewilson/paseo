@@ -32,6 +32,13 @@ export interface OpenCodeEventConsumerOptions {
   logger: Pick<Logger, "debug" | "warn">;
   createClient?: (baseUrl: string) => OpencodeClient;
   timing?: OpenCodeEventConsumerTiming;
+  /**
+   * Defer opening the SSE connection until `start()` is called. The server
+   * manager sets this so the first `/global/event` request is only issued
+   * after the helper announces HTTP readiness; connecting earlier can latch
+   * onto a mid-initialization listener that never emits a first record.
+   */
+  deferStart?: boolean;
 }
 
 const WATCHDOG_MS = 30_000;
@@ -80,6 +87,8 @@ export class OpenCodeEventConsumer implements OpenCodeEventSource {
   private rejectReady!: (error: Error) => void;
   private connectionAbort = new AbortController();
   private connectionTask: Promise<void>;
+  private readonly processExit: Promise<Error>;
+  private transportStarted = false;
   private attempt = 0;
   private phase: OpenCodeEventStreamPhase = "first-record";
   private lastOutcome?: OpenCodeConnectionOutcome;
@@ -93,12 +102,26 @@ export class OpenCodeEventConsumer implements OpenCodeEventSource {
       createOpencodeClient({ baseUrl: options.serverUrl });
     this.logger = options.logger;
     this.timing = options.timing ?? systemTiming;
+    this.processExit = options.processExit;
     this.readyPromise = new Promise<void>((resolve, reject) => {
       this.resolveReady = resolve;
       this.rejectReady = reject;
     });
     void this.readyPromise.catch(() => undefined);
-    this.connectionTask = this.consume(options.processExit);
+    this.connectionTask = Promise.resolve();
+    if (!options.deferStart) {
+      this.start();
+    }
+  }
+
+  /**
+   * Open the SSE transport. Idempotent; a no-op after close(). Required only
+   * when the consumer was constructed with `deferStart`.
+   */
+  start(): void {
+    if (this.transportStarted || this.closed) return;
+    this.transportStarted = true;
+    this.connectionTask = this.consume(this.processExit);
     void this.connectionTask.catch(() => undefined);
   }
 
@@ -262,5 +285,8 @@ function errorMessage(error: unknown): string {
 }
 
 export type OpenCodeEventConsumerFactory = (
-  options: Pick<OpenCodeEventConsumerOptions, "serverUrl" | "processExit" | "logger">,
+  options: Pick<
+    OpenCodeEventConsumerOptions,
+    "serverUrl" | "processExit" | "logger" | "deferStart"
+  >,
 ) => OpenCodeEventConsumer;
