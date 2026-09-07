@@ -77,7 +77,7 @@ export interface OpenCodeServerManagerOptions {
 }
 
 export class OpenCodeServerManager implements OpenCodeServerManagerLike {
-  private static instance: OpenCodeServerManager | null = null;
+  private static readonly instances = new Map<string, OpenCodeServerManager>();
   private static exitHandlerRegistered = false;
   private currentServer: OpenCodeServerGeneration | null = null;
   private retiredServers = new Set<OpenCodeServerGeneration>();
@@ -100,7 +100,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     this.logger = options.logger;
     this.baseEnv = options.baseEnv;
     this.runtimeSettings = options.runtimeSettings;
-    this.runtimeSettingsKey = JSON.stringify(this.runtimeSettings ?? {});
+    this.runtimeSettingsKey = stableSerialize(this.runtimeSettings ?? {});
     this.managedProcesses = options.managedProcesses;
     this.terminateProcess = options.terminateProcess ?? terminateWithTreeKill;
     this.portAllocator = options.portAllocator ?? findAvailablePort;
@@ -119,24 +119,20 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     runtimeSettings?: ProviderRuntimeSettings,
     options: Omit<OpenCodeServerManagerOptions, "logger" | "runtimeSettings"> = {},
   ): OpenCodeServerManager {
-    const nextSettingsKey = JSON.stringify(runtimeSettings ?? {});
-    if (!OpenCodeServerManager.instance) {
-      OpenCodeServerManager.instance = new OpenCodeServerManager({
-        logger,
-        runtimeSettings,
-        ...options,
-      });
-      OpenCodeServerManager.registerExitHandler();
-    } else if (OpenCodeServerManager.instance.runtimeSettingsKey !== nextSettingsKey) {
-      logger.warn(
-        {
-          existingRuntimeSettings: OpenCodeServerManager.instance.runtimeSettingsKey,
-          requestedRuntimeSettings: nextSettingsKey,
-        },
-        "OpenCode server manager already initialized with different runtime settings",
-      );
+    const settingsKey = stableSerialize(runtimeSettings ?? {});
+    const existing = OpenCodeServerManager.instances.get(settingsKey);
+    if (existing) {
+      return existing;
     }
-    return OpenCodeServerManager.instance;
+
+    const instance = new OpenCodeServerManager({
+      logger,
+      runtimeSettings,
+      ...options,
+    });
+    OpenCodeServerManager.instances.set(settingsKey, instance);
+    OpenCodeServerManager.registerExitHandler();
+    return instance;
   }
 
   private static registerExitHandler(): void {
@@ -146,8 +142,8 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     OpenCodeServerManager.exitHandlerRegistered = true;
 
     const cleanup = () => {
-      const instance = OpenCodeServerManager.instance;
-      void instance?.shutdown();
+      const instances = Array.from(OpenCodeServerManager.instances.values());
+      void Promise.all(instances.map((instance) => instance.shutdown()));
     };
 
     process.on("exit", cleanup);
@@ -358,7 +354,12 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       refCount: 0,
       retired: false,
       ready: Promise.resolve(),
-      events: this.createEventSource({ serverUrl: url, processExit, logger: this.logger }),
+      events: this.createEventSource({
+        serverUrl: url,
+        processExit,
+        logger: this.logger,
+        deferStart: true,
+      }),
       managedProcessRecord,
     };
     this.logger.info(
@@ -458,14 +459,23 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       });
     });
 
-    server.ready = ready.catch(async (error) => {
-      await this.killServer(server);
-      if (this.currentServer === server) {
-        this.currentServer = null;
-      }
-      this.retiredServers.delete(server);
-      throw error;
-    });
+    server.ready = ready.then(
+      () => {
+        // Start the shared transport only after the helper has announced HTTP
+        // readiness. OpenCode can accept an early SSE request while still
+        // initializing and then never emit its first record.
+        server.events.start();
+        return undefined;
+      },
+      async (error) => {
+        await this.killServer(server);
+        if (this.currentServer === server) {
+          this.currentServer = null;
+        }
+        this.retiredServers.delete(server);
+        throw error;
+      },
+    );
 
     return server;
   }
@@ -481,6 +491,9 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     await Promise.all(servers.map((server) => this.killServer(server)));
     this.currentServer = null;
     this.retiredServers.clear();
+    if (OpenCodeServerManager.instances.get(this.runtimeSettingsKey) === this) {
+      OpenCodeServerManager.instances.delete(this.runtimeSettingsKey);
+    }
   }
 
   private async cleanupRetiredServers(): Promise<void> {
@@ -584,6 +597,30 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       this.logger.warn({ err: error, id }, "Failed to remove OpenCode helper process record");
     }
   }
+}
+
+/**
+ * Serialize JSON-shaped runtime settings independent of object insertion
+ * order. Runtime settings are part of the process identity, so equivalent
+ * configurations must share a manager while distinct configurations must not.
+ */
+function stableSerialize(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(String(value));
 }
 
 function generationLogContext(server: OpenCodeServerGeneration): Record<string, unknown> {

@@ -17,6 +17,32 @@ describe("OpenCodeEventConsumer", () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
+  test("does not open the event stream until explicitly started", async () => {
+    const upstream = await createSseUpstream();
+    const consumer = new OpenCodeEventConsumer({
+      serverUrl: upstream.url,
+      processExit: new Promise<Error>(() => undefined),
+      logger: createRecordingLogger(),
+      deferStart: true,
+    });
+    cleanups.push(async () => {
+      await consumer.close();
+      await upstream.close();
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(upstream.requests).toEqual([]);
+
+    consumer.start();
+    await upstream.connected(1);
+    upstream.send(0, connectedRecord("/workspace"));
+    await consumer.ready();
+
+    consumer.start();
+    expect(upstream.requests).toHaveLength(1);
+  });
+
   test("settles when close wins immediately before an injected backoff wait", async () => {
     const upstream = await createSseUpstream();
     upstream.failNext(1);

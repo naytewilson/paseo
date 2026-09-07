@@ -30,6 +30,37 @@ afterEach(() => {
 });
 
 describe("OpenCodeServerManager generations", () => {
+  test("isolates managers by semantically equivalent and different runtime settings", async () => {
+    const firstSettings = {
+      env: {
+        OPENCODE_CONFIG: "/tmp/first-opencode.json",
+        OPENCODE_CONFIG_CONTENT: '{"model":"free_pool/echo-pong"}',
+      },
+    };
+    const equivalentSettings = {
+      env: {
+        OPENCODE_CONFIG_CONTENT: '{"model":"free_pool/echo-pong"}',
+        OPENCODE_CONFIG: "/tmp/first-opencode.json",
+      },
+    };
+    const differentSettings = {
+      env: {
+        OPENCODE_CONFIG: "/tmp/second-opencode.json",
+        OPENCODE_CONFIG_CONTENT: '{"model":"free_pool/auto"}',
+      },
+    };
+
+    const first = OpenCodeServerManager.getInstance(createTestLogger(), firstSettings);
+    const equivalent = OpenCodeServerManager.getInstance(createTestLogger(), equivalentSettings);
+    const different = OpenCodeServerManager.getInstance(createTestLogger(), differentSettings);
+
+    expect(equivalent).toBe(first);
+    expect(different).not.toBe(first);
+
+    await first.shutdown();
+    await different.shutdown();
+  });
+
   test("logs generation lifecycle transitions", async () => {
     const { logger, records } = createCapturingLogger();
     const { manager } = createTestManager([4081, 4082], { logger });
@@ -80,6 +111,68 @@ describe("OpenCodeServerManager generations", () => {
     expect(requestCount).toBe(1);
     await manager.shutdown();
     await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  });
+
+  test("opens the event stream only after the helper announces listening", async () => {
+    const responses: ServerResponse[] = [];
+    let requestCount = 0;
+    const upstream = createServer((_request, response) => {
+      requestCount += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.flushHeaders();
+      responses.push(response);
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("Missing upstream address");
+    const { manager, runtime } = createTestManager([address.port], { autoAnnounce: false });
+
+    try {
+      const acquisitionPromise = manager.acquireCurrent();
+      await runtime.settle();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(requestCount).toBe(0);
+
+      runtime.processForPort(address.port).announceListening();
+      const acquisition = await acquisitionPromise;
+      await vi.waitFor(() => expect(requestCount).toBe(1));
+      responses[0]?.write(
+        `data: ${JSON.stringify({ directory: "/workspace", payload: { type: "server.connected", properties: {} } })}\n\n`,
+      );
+      await acquisition.events.ready();
+
+      await acquisition.release();
+    } finally {
+      await manager.shutdown();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+
+  test("startup failure before readiness never opens the event stream", async () => {
+    let requestCount = 0;
+    const upstream = createServer((_request, response) => {
+      requestCount += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.flushHeaders();
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("Missing upstream address");
+    const { manager, runtime } = createTestManager([address.port], { autoAnnounce: false });
+
+    try {
+      const acquisition = manager.acquireCurrent();
+      await runtime.settle();
+      runtime.processForPort(address.port).exitNormally();
+
+      await expect(acquisition).rejects.toThrow("OpenCode server exited with code 0");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(requestCount).toBe(0);
+      expect(await runtime.managedProcesses.list()).toEqual([]);
+    } finally {
+      await manager.shutdown();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
   });
 
   test("uses an explicit base environment for the server process", async () => {
