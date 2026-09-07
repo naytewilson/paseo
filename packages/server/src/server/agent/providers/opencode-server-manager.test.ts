@@ -28,6 +28,20 @@ afterEach(() => {
 });
 
 describe("OpenCodeServerManager generations", () => {
+  test("uses separate managers for different runtime settings", async () => {
+    const firstSettings = { env: { OPENCODE_CONFIG: "/tmp/first-opencode.json" } };
+    const secondSettings = { env: { OPENCODE_CONFIG: "/tmp/second-opencode.json" } };
+
+    const first = OpenCodeServerManager.getInstance(createTestLogger(), firstSettings);
+    const second = OpenCodeServerManager.getInstance(createTestLogger(), secondSettings);
+
+    expect(second).not.toBe(first);
+    expect(OpenCodeServerManager.getInstance(createTestLogger(), secondSettings)).toBe(second);
+
+    await first.shutdown();
+    await second.shutdown();
+  });
+
   test("shares one real SDK event stream across acquisitions until generation shutdown", async () => {
     const responses: ServerResponse[] = [];
     let requestCount = 0;
