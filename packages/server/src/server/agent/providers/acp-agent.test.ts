@@ -2424,6 +2424,86 @@ describe("ACPAgentSession slash commands", () => {
 });
 
 describe("ACPAgentSession", () => {
+  test("preserves Command Code read paths and ACP text-block output in the timeline", () => {
+    const session = createSessionWithConfig({ provider: "commandcode" });
+    const internals = asInternals<ACPSessionInternals>(session);
+
+    const events = internals.translateSessionUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "command-read-1",
+      title: "read_file",
+      kind: "read",
+      status: "completed",
+      rawInput: {
+        file_path: "/workspace/README.md",
+        line: 4,
+        limit: 12,
+      },
+      rawOutput: [
+        {
+          type: "text",
+          text: "Read 1/1 file, 12 lines\nPASEO CLI fidelity fixture",
+        },
+      ],
+    } satisfies SessionUpdate);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "timeline",
+      item: {
+        type: "tool_call",
+        callId: "command-read-1",
+        name: "read",
+        status: "completed",
+        detail: {
+          type: "read",
+          filePath: "/workspace/README.md",
+          content: "Read 1/1 file, 12 lines\nPASEO CLI fidelity fixture",
+          offset: 4,
+          limit: 12,
+        },
+      },
+    });
+  });
+
+  test("coalesces repeated ACP tool_call updates without losing raw input", () => {
+    const session = createSessionWithConfig({ provider: "commandcode" });
+    const internals = asInternals<ACPSessionInternals>(session);
+    const toolCallId = "command-read-repeated-1";
+
+    internals.translateSessionUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId,
+      title: "read_file",
+      kind: "read",
+      status: "pending",
+      rawInput: { file_path: "/workspace/README.md" },
+    } satisfies SessionUpdate);
+
+    const events = internals.translateSessionUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId,
+      title: "read_file",
+      kind: "read",
+      status: "in_progress",
+    } satisfies SessionUpdate);
+
+    expect(events).toMatchObject([
+      {
+        type: "timeline",
+        item: {
+          type: "tool_call",
+          callId: toolCallId,
+          status: "running",
+          detail: {
+            type: "read",
+            filePath: "/workspace/README.md",
+          },
+        },
+      },
+    ]);
+  });
+
   test("drops MCP servers from ACP requests when the provider does not support MCP", () => {
     const session = new ACPAgentSession(
       {
