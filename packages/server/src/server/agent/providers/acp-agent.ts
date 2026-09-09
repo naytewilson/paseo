@@ -2877,7 +2877,11 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         this.fallbackAssistantMessageId = null;
         return [
           ...pendingUserEvents,
-          ...this.handleToolCallUpdate(update.toolCallId, update, undefined),
+          ...this.handleToolCallUpdate(
+            update.toolCallId,
+            update,
+            this.toolCalls.get(update.toolCallId),
+          ),
         ];
       case "tool_call_update":
         return [
@@ -3561,6 +3565,7 @@ interface MapToolDetailContext {
   snapshot: ACPToolSnapshot;
   firstLocation: string | undefined;
   textContent: string | undefined;
+  rawOutputText: string | undefined;
   diffContent: ReturnType<typeof extractDiffContent>;
   terminalContent: ReturnType<typeof extractTerminalContent>;
   rawInput: ReturnType<typeof readRecord>;
@@ -3575,6 +3580,7 @@ function mapToolDetail(
     snapshot,
     firstLocation: snapshot.locations?.[0]?.path,
     textContent: extractToolText(snapshot.content),
+    rawOutputText: extractRawText(snapshot.rawOutput),
     diffContent: extractDiffContent(snapshot.content),
     terminalContent: extractTerminalContent(snapshot.content, terminals),
     rawInput: readRecord(snapshot.rawInput),
@@ -3613,13 +3619,16 @@ function mapToolDetail(
 }
 
 function buildReadToolDetail(context: MapToolDetailContext): ToolCallDetail {
-  const { snapshot, firstLocation, textContent, rawInput, rawOutput } = context;
+  const { snapshot, firstLocation, textContent, rawOutputText, rawInput, rawOutput } = context;
   return {
     type: "read",
-    filePath: firstLocation ?? readString(rawInput, ["path", "filePath", "file"]) ?? snapshot.title,
-    content: textContent ?? readString(rawOutput, ["content", "text"]),
-    offset: readNumber(rawInput, ["offset", "line"]),
-    limit: readNumber(rawInput, ["limit"]),
+    filePath:
+      firstLocation ??
+      readString(rawInput, ["path", "filePath", "file", "file_path"]) ??
+      snapshot.title,
+    content: textContent ?? rawOutputText ?? readString(rawOutput, ["content", "text"]),
+    offset: readNumber(rawInput, ["offset", "line", "startLine", "start_line"]),
+    limit: readNumber(rawInput, ["limit", "maxLines", "max_lines"]),
   };
 }
 
@@ -3627,50 +3636,63 @@ function buildEditToolDetail(context: MapToolDetailContext): ToolCallDetail {
   const { snapshot, firstLocation, textContent, diffContent, rawInput } = context;
   return {
     type: "edit",
-    filePath: firstLocation ?? readString(rawInput, ["path", "filePath", "file"]) ?? snapshot.title,
-    oldString: diffContent?.oldText ?? readString(rawInput, ["oldText", "oldString"]),
+    filePath:
+      firstLocation ??
+      readString(rawInput, ["path", "filePath", "file", "file_path"]) ??
+      snapshot.title,
+    oldString:
+      diffContent?.oldText ??
+      readString(rawInput, ["oldText", "oldString", "old_text", "old_string"]),
     newString:
       snapshot.kind === "delete"
         ? ""
-        : (diffContent?.newText ?? readString(rawInput, ["newText", "newString"])),
+        : (diffContent?.newText ??
+          readString(rawInput, ["newText", "newString", "new_text", "new_string"])),
     unifiedDiff: textContent ?? undefined,
   };
 }
 
 function buildSearchAcpToolDetail(context: MapToolDetailContext): ToolCallDetail {
-  const { snapshot, textContent, rawInput, rawOutput } = context;
+  const { snapshot, textContent, rawOutputText, rawInput, rawOutput } = context;
   return {
     type: "search",
-    query: readString(rawInput, ["query", "pattern"]) ?? snapshot.title,
+    query:
+      readString(rawInput, ["query", "pattern", "searchQuery", "search_query"]) ?? snapshot.title,
     toolName: "search",
-    content: textContent ?? readString(rawOutput, ["content", "text"]),
+    content: textContent ?? rawOutputText ?? readString(rawOutput, ["content", "text"]),
     filePaths: snapshot.locations?.map((location) => location.path),
   };
 }
 
 function buildShellToolDetail(context: MapToolDetailContext): ToolCallDetail {
-  const { snapshot, textContent, terminalContent, rawInput, rawOutput } = context;
+  const { snapshot, textContent, rawOutputText, terminalContent, rawInput, rawOutput } = context;
   return {
     type: "shell",
     command:
       terminalContent?.command ??
       buildShellCommand(rawInput) ??
-      readString(rawInput, ["command"]) ??
+      readString(rawInput, ["command", "cmd"]) ??
       snapshot.title,
-    cwd: terminalContent?.cwd ?? readString(rawInput, ["cwd"]),
-    output: terminalContent?.output ?? textContent ?? readString(rawOutput, ["output", "text"]),
-    exitCode: terminalContent?.exitCode ?? readNumber(rawOutput, ["exitCode"]),
+    cwd:
+      terminalContent?.cwd ??
+      readString(rawInput, ["cwd", "workingDirectory", "working_directory"]),
+    output:
+      terminalContent?.output ??
+      textContent ??
+      rawOutputText ??
+      readString(rawOutput, ["output", "text"]),
+    exitCode: terminalContent?.exitCode ?? readNumber(rawOutput, ["exitCode", "exit_code"]),
   };
 }
 
 function buildFetchToolDetail(context: MapToolDetailContext): ToolCallDetail {
-  const { snapshot, textContent, rawInput, rawOutput } = context;
+  const { snapshot, textContent, rawOutputText, rawInput, rawOutput } = context;
   return {
     type: "fetch",
     url: readString(rawInput, ["url"]) ?? snapshot.title,
     prompt: readString(rawInput, ["prompt"]),
-    result: textContent ?? readString(rawOutput, ["result", "text", "content"]),
-    code: readNumber(rawOutput, ["status", "code"]),
+    result: textContent ?? rawOutputText ?? readString(rawOutput, ["result", "text", "content"]),
+    code: readNumber(rawOutput, ["status", "code", "status_code"]),
   };
 }
 
@@ -3714,6 +3736,40 @@ function extractToolText(content: ToolCallContent[] | null | undefined): string 
     }
   }
   return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+/**
+ * ACP leaves rawInput/rawOutput provider-defined. Several otherwise valid
+ * providers return output as content blocks instead of an object with a
+ * `text` field, so keep that result visible without weakening the canonical
+ * timeline schema.
+ */
+function extractRawText(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value.trim().length > 0 ? value : undefined;
+  }
+  if (Array.isArray(value)) {
+    const parts = value.flatMap((entry) => {
+      const text = extractRawText(entry);
+      return text === undefined ? [] : [text];
+    });
+    return parts.length > 0 ? parts.join("\n") : undefined;
+  }
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const directText = readString(value, ["text", "content", "output", "result", "stdout", "stderr"]);
+  if (directText !== undefined) {
+    return directText;
+  }
+  for (const key of ["content", "output", "result"]) {
+    const nested = extractRawText(value[key]);
+    if (nested !== undefined) {
+      return nested;
+    }
+  }
+  return undefined;
 }
 
 function extractDiffContent(
