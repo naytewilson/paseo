@@ -1947,6 +1947,82 @@ describe("deriveModelDefinitionsFromACP", () => {
     expect(result[0]?.defaultThinkingOptionId).toBe("medium");
   });
 
+  test("V6-R1: non-current model with levels but no default keeps options and no default", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [
+          { modelId: "model-a", name: "Model A" },
+          {
+            modelId: "model-b",
+            name: "Model B",
+            _meta: { thoughtLevels: ["medium", "high"] },
+          },
+        ],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    const byId = new Map(result.map((model) => [model.id, model]));
+    // Session default (medium, model A's truth) must not leak into model B.
+    expect(byId.get("model-b")?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "medium",
+      "high",
+    ]);
+    expect(byId.get("model-b")?.defaultThinkingOptionId).toBeUndefined();
+    expect(byId.get("model-b")?.thinkingOptions?.some((option) => option.isDefault)).toBe(false);
+  });
+
+  test("V6-R1: non-current model with invalid declared default still gets no session-derived default", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [
+          { modelId: "model-a", name: "Model A" },
+          {
+            modelId: "model-b",
+            name: "Model B",
+            _meta: { thoughtLevels: ["medium", "high"], defaultThoughtLevel: "ultra" },
+          },
+        ],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    const byId = new Map(result.map((model) => [model.id, model]));
+    expect(byId.get("model-b")?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "medium",
+      "high",
+    ]);
+    expect(byId.get("model-b")?.defaultThinkingOptionId).toBeUndefined();
+    expect(byId.get("model-b")?.thinkingOptions?.some((option) => option.isDefault)).toBe(false);
+  });
+
+  test("V6-R1: current model still falls back to its session default without a metadata default", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [
+          {
+            modelId: "model-a",
+            name: "Model A",
+            _meta: { thoughtLevels: ["low", "medium"] },
+          },
+        ],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    expect(result[0]?.thinkingOptions?.map((option) => option.id)).toEqual(["low", "medium"]);
+    expect(result[0]?.defaultThinkingOptionId).toBe("medium");
+    expect(result[0]?.thinkingOptions?.find((option) => option.id === "medium")?.isDefault).toBe(
+      true,
+    );
+  });
+
   test("treats an empty declared level set as uncontrollable reasoning", () => {
     const result = deriveModelDefinitionsFromACP(
       "v6-provider",

@@ -832,7 +832,9 @@ export function resolveACPModelThinkingContract(input: {
     });
     const defaultThinkingOptionId =
       (meta.defaultLevel && meta.levels.includes(meta.defaultLevel) ? meta.defaultLevel : null) ??
-      (sessionDefaultThinkingOptionId && meta.levels.includes(sessionDefaultThinkingOptionId)
+      (isCurrentModel &&
+      sessionDefaultThinkingOptionId &&
+      meta.levels.includes(sessionDefaultThinkingOptionId)
         ? sessionDefaultThinkingOptionId
         : null) ??
       undefined;
