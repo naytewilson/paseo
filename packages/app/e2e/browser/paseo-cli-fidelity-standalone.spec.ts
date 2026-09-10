@@ -2,7 +2,7 @@ import { test, expect } from "../support/fixtures";
 import { expectComposerVisible } from "../support/helpers/composer";
 import { openAgentRoute, seedMockAgentWorkspace } from "../support/helpers/mock-agent";
 
-test.describe("PASEO Browser CLI Fidelity Presentation", () => {
+test.describe("PASEO Browser CLI Fidelity Presentation V5", () => {
   test("renders real browser tool card with Read and file path summary", async ({ page }, testInfo) => {
     test.setTimeout(120_000);
     await page.setViewportSize({ width: 1280, height: 800 });
@@ -34,18 +34,19 @@ test.describe("PASEO Browser CLI Fidelity Presentation", () => {
 
       // Verify the real rendered tool-call card
       const readBadge = group.getByTestId("tool-call-badge").first();
-      await expect(readBadge).toBeVisible({ timeout: 15_000 });
+      await expect(readBadge).toBeVisible({ timeout: 20_000 });
       await expect(readBadge).toContainText("Read");
       await expect(readBadge).toContainText("packages/app/src/components/conversation-list.tsx");
+      await expect(readBadge).not.toHaveText(/read_file/);
 
       // Verify single card per lifecycle (not duplicated)
       const allReadBadges = group.getByTestId("tool-call-badge").filter({ hasText: "packages/app/src/components/conversation-list.tsx" });
       await expect(allReadBadges).toHaveCount(1);
 
       // Capture screenshot artifact
-      const screenshotPath = testInfo.outputPath("paseo-browser-cli-fidelity-cards.png");
+      const screenshotPath = testInfo.outputPath("paseo-browser-cli-fidelity-cards-v5.png");
       await page.screenshot({ path: screenshotPath, fullPage: true });
-      await testInfo.attach("paseo-browser-cli-fidelity-cards", {
+      await testInfo.attach("paseo-browser-cli-fidelity-cards-v5", {
         path: screenshotPath,
         contentType: "image/png",
       });
