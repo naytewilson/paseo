@@ -95,15 +95,30 @@ function resolveThinkingId(
   return selectedModel?.defaultThinkingOptionId ?? null;
 }
 
+function hasExplicitThinkingSelection(
+  explicitThinkingOptionId: string | null | undefined,
+): boolean {
+  return Boolean(explicitThinkingOptionId && explicitThinkingOptionId !== "default");
+}
+
 type ThinkingOption = NonNullable<AgentModelDefinition["thinkingOptions"]>[number];
 
 function resolveEffectiveThinking(
   thinkingOptions: ThinkingOption[] | null,
   resolvedThinkingId: string | null,
+  hasExplicitThinking: boolean,
 ): ThinkingOption | null {
   const selectedThinking =
     thinkingOptions?.find((option) => option.id === resolvedThinkingId) ?? null;
-  return selectedThinking ?? thinkingOptions?.[0] ?? null;
+  if (selectedThinking) {
+    return selectedThinking;
+  }
+  // A stale explicit selection for another model must never silently become the
+  // new model's first option. Fall back only when nothing was explicitly chosen.
+  if (hasExplicitThinking) {
+    return null;
+  }
+  return thinkingOptions?.[0] ?? null;
 }
 
 function resolveModelDisplay(
@@ -163,7 +178,11 @@ export function resolveAgentModelSelection(input: {
 
   const thinkingOptions = selectedModel?.thinkingOptions ?? null;
   const resolvedThinkingId = resolveThinkingId(explicitThinkingOptionId, selectedModel);
-  const effectiveThinking = resolveEffectiveThinking(thinkingOptions, resolvedThinkingId);
+  const effectiveThinking = resolveEffectiveThinking(
+    thinkingOptions,
+    resolvedThinkingId,
+    hasExplicitThinkingSelection(explicitThinkingOptionId),
+  );
   const selectedThinkingId = effectiveThinking?.id ?? null;
   const displayThinking = resolveThinkingDisplay(
     effectiveThinking,
@@ -179,4 +198,57 @@ export function resolveAgentModelSelection(input: {
     selectedThinkingId,
     displayThinking,
   };
+}
+
+type RuntimeThinkingOptions = AgentModelDefinition["thinkingOptions"];
+
+const runtimeThinkingOptionCache = new Map<string, RuntimeThinkingOptions>();
+
+function parseRuntimeThinkingOptionUncached(value: unknown): RuntimeThinkingOptions {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const options = value.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) {
+      return [];
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.id !== "string" || typeof record.label !== "string") {
+      return [];
+    }
+    return [
+      {
+        id: record.id,
+        label: record.label,
+        description: typeof record.description === "string" ? record.description : undefined,
+        isDefault: record.isDefault === true,
+      },
+    ];
+  });
+  return options.length > 0 ? options : undefined;
+}
+
+export function parseRuntimeThinkingOption(value: unknown): RuntimeThinkingOptions {
+  let cacheKey: string | null = null;
+  try {
+    cacheKey = JSON.stringify(value) ?? null;
+  } catch {
+    cacheKey = null;
+  }
+  // Zustand selectors must return referentially stable output: a fresh array per
+  // evaluation never settles under shallow comparison and render-loops the app.
+  if (cacheKey !== null && runtimeThinkingOptionCache.has(cacheKey)) {
+    return runtimeThinkingOptionCache.get(cacheKey);
+  }
+  const parsed = parseRuntimeThinkingOptionUncached(value);
+  if (cacheKey !== null) {
+    runtimeThinkingOptionCache.set(cacheKey, parsed);
+    if (runtimeThinkingOptionCache.size > 16) {
+      const oldest = runtimeThinkingOptionCache.keys().next();
+      if (!oldest.done) {
+        runtimeThinkingOptionCache.delete(oldest.value);
+      }
+    }
+  }
+  return parsed;
 }
