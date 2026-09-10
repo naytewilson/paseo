@@ -213,9 +213,9 @@ describe("KimiACPAgentClient per-model thinking options", () => {
     });
 
     const kimiK3 = catalog.models.find((model) => model.id === "kimi-k3");
-    expect(kimiK3?.thinkingOptions).toEqual([
-      expect.objectContaining({ id: "off", isDefault: true }),
-      expect.objectContaining({ id: "on", isDefault: false }),
-    ]);
+    // V6 no-projection rule: a failed probe proves nothing about the model, so the
+    // model must not inherit the session's default options (another model's levels).
+    expect(kimiK3?.thinkingOptions).toBeUndefined();
+    expect(kimiK3?.defaultThinkingOptionId).toBeUndefined();
   });
 });

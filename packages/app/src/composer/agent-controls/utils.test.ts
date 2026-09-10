@@ -4,6 +4,7 @@ import {
   getFeatureTooltip,
   getAgentControlHintKey,
   normalizeModelId,
+  parseRuntimeThinkingOption,
   resolveAgentModelSelection,
 } from "./utils";
 
@@ -185,5 +186,133 @@ describe("resolveAgentModelSelection", () => {
     expect(selection.displayModel).toBe("Default (Sonnet 4.6)");
     expect(selection.selectedThinkingId).toBe("low");
     expect(selection.displayThinking).toBe("Low");
+  });
+});
+
+describe("resolveAgentModelSelection model-specific contracts (V6)", () => {
+  const disjointModels = [
+    {
+      id: "model-a",
+      provider: "v6",
+      label: "Model A",
+      thinkingOptions: [
+        { id: "low", label: "Low" },
+        { id: "medium", label: "Medium" },
+      ],
+      defaultThinkingOptionId: "low",
+    },
+    {
+      id: "model-b",
+      provider: "v6",
+      label: "Model B",
+      thinkingOptions: [
+        { id: "high", label: "High" },
+        { id: "xhigh", label: "xhigh" },
+      ],
+      defaultThinkingOptionId: "xhigh",
+    },
+    {
+      id: "model-c",
+      provider: "v6",
+      label: "Model C",
+    },
+  ];
+
+  it("exposes only the selected model's reasoning choices", () => {
+    const selection = resolveAgentModelSelection({
+      models: disjointModels,
+      runtimeModelId: "model-a",
+      configuredModelId: null,
+      explicitThinkingOptionId: null,
+    });
+
+    expect(selection.thinkingOptions?.map((option) => option.id)).toEqual(["low", "medium"]);
+    expect(selection.selectedThinkingId).toBe("low");
+  });
+
+  it("does not leak stale effort across disjoint models", () => {
+    const selection = resolveAgentModelSelection({
+      models: disjointModels,
+      runtimeModelId: "model-b",
+      configuredModelId: null,
+      explicitThinkingOptionId: "low",
+    });
+
+    expect(selection.thinkingOptions?.map((option) => option.id)).toEqual(["high", "xhigh"]);
+    expect(selection.selectedThinkingId).toBeNull();
+  });
+
+  it("restores the correct contract when switching back", () => {
+    const switched = resolveAgentModelSelection({
+      models: disjointModels,
+      runtimeModelId: "model-b",
+      configuredModelId: null,
+      explicitThinkingOptionId: "xhigh",
+    });
+    expect(switched.selectedThinkingId).toBe("xhigh");
+
+    const back = resolveAgentModelSelection({
+      models: disjointModels,
+      runtimeModelId: "model-a",
+      configuredModelId: null,
+      explicitThinkingOptionId: "xhigh",
+    });
+    expect(back.thinkingOptions?.map((option) => option.id)).toEqual(["low", "medium"]);
+    expect(back.selectedThinkingId).toBeNull();
+  });
+
+  it("exposes no choices for a model without controllable reasoning", () => {
+    const selection = resolveAgentModelSelection({
+      models: disjointModels,
+      runtimeModelId: "model-c",
+      configuredModelId: null,
+      explicitThinkingOptionId: "low",
+    });
+
+    expect(selection.thinkingOptions).toBeNull();
+    expect(selection.selectedThinkingId).toBeNull();
+  });
+});
+
+describe("parseRuntimeThinkingOption selector stability (V6)", () => {
+  it("parses well-formed live thinking options", () => {
+    expect(
+      parseRuntimeThinkingOption([
+        { id: "low", label: "Low", isDefault: true },
+        { id: "medium", label: "Medium", description: "mid" },
+      ]),
+    ).toEqual([
+      { id: "low", label: "Low", description: undefined, isDefault: true },
+      { id: "medium", label: "Medium", description: "mid", isDefault: false },
+    ]);
+  });
+
+  it("returns undefined for missing or unparseable payloads", () => {
+    expect(parseRuntimeThinkingOption(undefined)).toBeUndefined();
+    expect(parseRuntimeThinkingOption(null)).toBeUndefined();
+    expect(parseRuntimeThinkingOption("low")).toBeUndefined();
+    expect(parseRuntimeThinkingOption([])).toBeUndefined();
+    expect(parseRuntimeThinkingOption([{ id: 7 }, null, "x"])).toBeUndefined();
+  });
+
+  it("returns a referentially stable result for equal content", () => {
+    const first = parseRuntimeThinkingOption([
+      { id: "high", label: "High" },
+      { id: "xhigh", label: "XHigh", isDefault: true },
+    ]);
+    const second = parseRuntimeThinkingOption([
+      { id: "high", label: "High" },
+      { id: "xhigh", label: "XHigh", isDefault: true },
+    ]);
+    expect(first).toBeDefined();
+    expect(second).toBe(first);
+  });
+
+  it("returns distinct results when content actually changes", () => {
+    const before = parseRuntimeThinkingOption([{ id: "low", label: "Low" }]);
+    const after = parseRuntimeThinkingOption([{ id: "medium", label: "Medium" }]);
+    expect(before).toBeDefined();
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
   });
 });

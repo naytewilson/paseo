@@ -4494,7 +4494,10 @@ test("persists live mode, model, and thinking changes without an external snapsh
 test("later explicit config mutations win over events emitted by earlier mutations", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-config-mutation-order-"));
   class ConfigMutationSession extends TestAgentSession {
-    async setModel(): Promise<void> {
+    private appliedModel: string | null = null;
+
+    async setModel(modelId: string | null): Promise<void> {
+      this.appliedModel = modelId;
       this.pushEvent({
         type: "timeline",
         provider: "codex",
@@ -4505,6 +4508,11 @@ test("later explicit config mutations win over events emitted by earlier mutatio
         provider: "codex",
         thinkingOptionId: "low",
       });
+    }
+
+    override async getRuntimeInfo() {
+      const info = await super.getRuntimeInfo();
+      return { ...info, model: this.appliedModel ?? info.model };
     }
 
     async setThinkingOption(): Promise<void> {}
@@ -4536,6 +4544,189 @@ test("later explicit config mutations win over events emitted by earlier mutatio
   await manager.flush();
 
   expect(manager.getAgent(snapshot.id)?.config.thinkingOptionId).toBe("high");
+});
+
+test("setAgentModel rejects explicitly when the session ignores the request", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-model-rejection-"));
+  class IgnoringSession extends TestAgentSession {
+    async setModel(): Promise<void> {}
+  }
+  class IgnoringClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new IgnoringSession(config);
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { codex: new IgnoringClient() },
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000135",
+  });
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, model: "gpt-5.2-codex" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await expect(manager.setAgentModel(snapshot.id, "gpt-5.4")).rejects.toThrow(
+    "did not apply model 'gpt-5.4'",
+  );
+  // Truthful state is kept: the manager records what the session still runs.
+  expect(manager.getAgent(snapshot.id)?.config.model).toBe("gpt-5.2-codex");
+  expect(manager.getAgent(snapshot.id)?.runtimeInfo?.model).toBe("gpt-5.2-codex");
+});
+
+test("setAgentModel adopts a provider-coerced model surfaced via event", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-model-coercion-"));
+  class CoercingSession extends TestAgentSession {
+    private coerced = false;
+
+    async setModel(): Promise<void> {
+      this.coerced = true;
+      this.pushEvent({
+        type: "model_changed",
+        provider: "codex",
+        runtimeInfo: {
+          provider: "codex",
+          sessionId: this.id,
+          model: "canonical-model",
+        },
+      });
+    }
+
+    override async getRuntimeInfo() {
+      const info = await super.getRuntimeInfo();
+      return this.coerced ? { ...info, model: "canonical-model" } : info;
+    }
+  }
+  class CoercingClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new CoercingSession(config);
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { codex: new CoercingClient() },
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000136",
+  });
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, model: "gpt-5.2-codex" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await manager.setAgentModel(snapshot.id, "gpt-5.4");
+
+  expect(manager.getAgent(snapshot.id)?.config.model).toBe("canonical-model");
+  expect(manager.getAgent(snapshot.id)?.runtimeInfo?.model).toBe("canonical-model");
+});
+
+test("setAgentThinkingOption rejects explicitly when the session ignores the request", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-thinking-rejection-"));
+  class IgnoringThinkingSession extends TestAgentSession {
+    async setThinkingOption(): Promise<void> {}
+
+    override async getRuntimeInfo() {
+      const info = await super.getRuntimeInfo();
+      return { ...info, thinkingOptionId: "low" };
+    }
+  }
+  class IgnoringThinkingClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new IgnoringThinkingSession(config);
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { codex: new IgnoringThinkingClient() },
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000137",
+  });
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, model: "gpt-5.2-codex", thinkingOptionId: "low" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await expect(manager.setAgentThinkingOption(snapshot.id, "high")).rejects.toThrow(
+    "did not apply thinking option 'high'",
+  );
+  expect(manager.getAgent(snapshot.id)?.config.thinkingOptionId).toBe("low");
+  expect(manager.getAgent(snapshot.id)?.runtimeInfo?.thinkingOptionId).toBe("low");
+});
+
+test("setAgentThinkingOption adopts a provider-coerced option surfaced via event", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-thinking-coercion-"));
+  class CoercingThinkingSession extends TestAgentSession {
+    private coerced = false;
+
+    async setThinkingOption(): Promise<void> {
+      this.coerced = true;
+      this.pushEvent({
+        type: "thinking_option_changed",
+        provider: "codex",
+        thinkingOptionId: "medium",
+      });
+    }
+
+    override async getRuntimeInfo() {
+      const info = await super.getRuntimeInfo();
+      return this.coerced ? { ...info, thinkingOptionId: "medium" } : info;
+    }
+  }
+  class CoercingThinkingClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new CoercingThinkingSession(config);
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { codex: new CoercingThinkingClient() },
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000138",
+  });
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, model: "gpt-5.2-codex", thinkingOptionId: "low" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await manager.setAgentThinkingOption(snapshot.id, "high");
+
+  expect(manager.getAgent(snapshot.id)?.config.thinkingOptionId).toBe("medium");
+  expect(manager.getAgent(snapshot.id)?.runtimeInfo?.thinkingOptionId).toBe("medium");
+});
+
+test("setAgentThinkingOption normalizes legacy 'default' to provider default", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-thinking-default-"));
+  const received: Array<string | null> = [];
+  class RecordingThinkingSession extends TestAgentSession {
+    async setThinkingOption(thinkingOptionId: string | null): Promise<void> {
+      received.push(thinkingOptionId);
+    }
+  }
+  class RecordingThinkingClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new RecordingThinkingSession(config);
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { codex: new RecordingThinkingClient() },
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000139",
+  });
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, model: "gpt-5.2-codex", thinkingOptionId: "low" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await manager.setAgentThinkingOption(snapshot.id, "default");
+
+  expect(received).toEqual([null]);
+  expect(manager.getAgent(snapshot.id)?.config.thinkingOptionId).toBeUndefined();
 });
 
 test("session config drift events update state through the stream channel", async () => {

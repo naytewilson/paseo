@@ -1872,10 +1872,31 @@ export class AgentManager {
     const normalizedModelId =
       typeof modelId === "string" && modelId.trim().length > 0 ? modelId : null;
 
-    if (agent.session.setModel) {
-      await agent.session.setModel(normalizedModelId);
+    const hasSetter = typeof agent.session.setModel === "function";
+    const modelBefore = agent.runtimeInfo?.model;
+    if (hasSetter) {
+      await agent.session.setModel?.(normalizedModelId);
     }
     await this.drainSessionEvents(agentId);
+
+    if (hasSetter) {
+      const effectiveModel = await this.readSessionReportedModel(agent);
+      const reportedModelChanged = agent.runtimeInfo?.model !== modelBefore;
+      if (effectiveModel !== undefined && effectiveModel !== normalizedModelId) {
+        agent.config.model = effectiveModel ?? undefined;
+        if (agent.runtimeInfo) {
+          agent.runtimeInfo = { ...agent.runtimeInfo, model: effectiveModel };
+        }
+        this.touchUpdatedAt(agent);
+        this.emitState(agent);
+        if (!reportedModelChanged && normalizedModelId !== null) {
+          throw new Error(
+            `Provider '${agent.provider}' did not apply model '${normalizedModelId}'; still on '${effectiveModel ?? "default"}'`,
+          );
+        }
+        return;
+      }
+    }
 
     agent.config.model = normalizedModelId ?? undefined;
     if (agent.runtimeInfo) {
@@ -1885,21 +1906,70 @@ export class AgentManager {
     this.emitState(agent);
   }
 
+  private async readSessionReportedModel(
+    agent: ActiveManagedAgent,
+  ): Promise<string | null | undefined> {
+    try {
+      return (await agent.session.getRuntimeInfo()).model;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readSessionReportedThinkingOption(
+    agent: ActiveManagedAgent,
+  ): Promise<string | null | undefined> {
+    try {
+      return (await agent.session.getRuntimeInfo()).thinkingOptionId;
+    } catch {
+      return undefined;
+    }
+  }
+
   async setAgentThinkingOption(
     agentId: string,
     thinkingOptionId: string | null,
   ): Promise<AgentProviderNotice | null> {
     const agent = this.requireSessionAgent(agentId);
+    const trimmedThinkingOptionId =
+      typeof thinkingOptionId === "string" ? thinkingOptionId.trim() : "";
     const normalizedThinkingOptionId =
-      typeof thinkingOptionId === "string" && thinkingOptionId.trim().length > 0
-        ? thinkingOptionId
+      trimmedThinkingOptionId.length > 0 && trimmedThinkingOptionId !== "default"
+        ? trimmedThinkingOptionId
         : null;
 
+    const hasSetter = typeof agent.session.setThinkingOption === "function";
+    const thinkingBefore = agent.runtimeInfo?.thinkingOptionId;
     let notice: AgentProviderNotice | null = null;
-    if (agent.session.setThinkingOption) {
-      notice = (await agent.session.setThinkingOption(normalizedThinkingOptionId)) ?? null;
+    if (hasSetter) {
+      notice = (await agent.session.setThinkingOption?.(normalizedThinkingOptionId)) ?? null;
     }
     await this.drainSessionEvents(agentId);
+
+    if (hasSetter) {
+      const effectiveThinkingOptionId = await this.readSessionReportedThinkingOption(agent);
+      const reportedThinkingChanged = agent.runtimeInfo?.thinkingOptionId !== thinkingBefore;
+      if (
+        effectiveThinkingOptionId !== undefined &&
+        effectiveThinkingOptionId !== normalizedThinkingOptionId
+      ) {
+        agent.config.thinkingOptionId = effectiveThinkingOptionId ?? undefined;
+        if (agent.runtimeInfo) {
+          agent.runtimeInfo = {
+            ...agent.runtimeInfo,
+            thinkingOptionId: effectiveThinkingOptionId,
+          };
+        }
+        this.touchUpdatedAt(agent);
+        this.emitState(agent);
+        if (!reportedThinkingChanged && normalizedThinkingOptionId !== null) {
+          throw new Error(
+            `Provider '${agent.provider}' did not apply thinking option '${normalizedThinkingOptionId}'; effective '${effectiveThinkingOptionId ?? "default"}'`,
+          );
+        }
+        return notice;
+      }
+    }
 
     agent.config.thinkingOptionId = normalizedThinkingOptionId ?? undefined;
     if (agent.runtimeInfo) {

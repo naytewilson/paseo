@@ -757,37 +757,152 @@ export function deriveModesFromACP(
   };
 }
 
+export interface ACPModelReasoningMeta {
+  supported: boolean | null;
+  levels: string[] | null;
+  defaultLevel: string | null;
+}
+
+const ACP_REASONING_LEVEL_KEYS = ["thoughtLevels", "reasoningLevels"] as const;
+const ACP_REASONING_DEFAULT_KEYS = ["defaultThoughtLevel", "defaultReasoningLevel"] as const;
+
+export function parseACPModelReasoningMeta(meta: unknown): ACPModelReasoningMeta {
+  const parsed: ACPModelReasoningMeta = { supported: null, levels: null, defaultLevel: null };
+  if (!isRecord(meta)) {
+    return parsed;
+  }
+  if (typeof meta.reasoning === "boolean") {
+    parsed.supported = meta.reasoning;
+  }
+  for (const key of ACP_REASONING_LEVEL_KEYS) {
+    const value = meta[key];
+    if (Array.isArray(value)) {
+      parsed.levels = value
+        .map((entry) => {
+          if (typeof entry === "string") return entry.trim();
+          if (isRecord(entry)) {
+            const id = entry.value ?? entry.id;
+            return typeof id === "string" ? id.trim() : "";
+          }
+          return "";
+        })
+        .filter((level) => level.length > 0);
+      break;
+    }
+  }
+  for (const key of ACP_REASONING_DEFAULT_KEYS) {
+    const value = meta[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      parsed.defaultLevel = value.trim();
+      break;
+    }
+  }
+  return parsed;
+}
+
+export interface ACPModelThinkingContract {
+  thinkingOptions?: ConfigOptionSelector[];
+  defaultThinkingOptionId?: string;
+}
+
+export function resolveACPModelThinkingContract(input: {
+  meta: ACPModelReasoningMeta;
+  sessionThinkingOptions: ConfigOptionSelector[];
+  sessionDefaultThinkingOptionId: string | null;
+  isCurrentModel: boolean;
+}): ACPModelThinkingContract {
+  const { meta, sessionThinkingOptions, sessionDefaultThinkingOptionId, isCurrentModel } = input;
+  if (meta.supported === false) {
+    return {};
+  }
+  if (meta.levels !== null) {
+    if (meta.levels.length === 0) {
+      return {};
+    }
+    const sessionById = new Map(sessionThinkingOptions.map((option) => [option.id, option]));
+    const thinkingOptions = meta.levels.map((level) => {
+      const sessionOption = sessionById.get(level);
+      return {
+        id: level,
+        label: sessionOption?.label ?? level,
+        description: sessionOption?.description,
+        isDefault: false,
+        metadata: sessionOption?.metadata,
+      };
+    });
+    const defaultThinkingOptionId =
+      (meta.defaultLevel && meta.levels.includes(meta.defaultLevel) ? meta.defaultLevel : null) ??
+      (sessionDefaultThinkingOptionId && meta.levels.includes(sessionDefaultThinkingOptionId)
+        ? sessionDefaultThinkingOptionId
+        : null) ??
+      undefined;
+    for (const option of thinkingOptions) {
+      option.isDefault = option.id === defaultThinkingOptionId;
+    }
+    return { thinkingOptions, defaultThinkingOptionId };
+  }
+  // The session thought_level set is live truth only for the currently selected
+  // model. Other models get no projected choices rather than fake ones.
+  if (!isCurrentModel) {
+    return {};
+  }
+  if (sessionThinkingOptions.length === 0) {
+    return {};
+  }
+  return {
+    thinkingOptions: sessionThinkingOptions.map((option) => Object.assign({}, option)),
+    defaultThinkingOptionId: sessionDefaultThinkingOptionId ?? undefined,
+  };
+}
+
 export function deriveModelDefinitionsFromACP(
   provider: string,
   models: SessionModelState | null | undefined,
   configOptions?: SessionConfigOption[] | null,
 ): AgentModelDefinition[] {
-  const thinkingOptions = deriveSelectorOptions(configOptions, "thought_level");
-  const defaultThinkingOptionId = thinkingOptions.find((option) => option.isDefault)?.id ?? null;
+  const sessionThinkingOptions = deriveSelectorOptions(configOptions, "thought_level");
+  const sessionDefaultThinkingOptionId =
+    sessionThinkingOptions.find((option) => option.isDefault)?.id ?? null;
 
   if (models?.availableModels?.length) {
-    return models.availableModels.map((model) => ({
-      provider,
-      id: model.modelId,
-      label: model.name,
-      description: model.description ?? undefined,
-      isDefault: model.modelId === models.currentModelId,
-      thinkingOptions: thinkingOptions.length > 0 ? thinkingOptions : undefined,
-      defaultThinkingOptionId: defaultThinkingOptionId ?? undefined,
-    }));
+    return models.availableModels.map((model) => {
+      const contract = resolveACPModelThinkingContract({
+        meta: parseACPModelReasoningMeta(model._meta),
+        sessionThinkingOptions,
+        sessionDefaultThinkingOptionId,
+        isCurrentModel: model.modelId === models.currentModelId,
+      });
+      return {
+        provider,
+        id: model.modelId,
+        label: model.name,
+        description: model.description ?? undefined,
+        isDefault: model.modelId === models.currentModelId,
+        thinkingOptions: contract.thinkingOptions,
+        defaultThinkingOptionId: contract.defaultThinkingOptionId,
+      };
+    });
   }
 
   const modelOptions = deriveSelectorOptions(configOptions, "model");
-  return modelOptions.map((option) => ({
-    provider,
-    id: option.id,
-    label: option.label,
-    description: option.description,
-    isDefault: option.isDefault,
-    thinkingOptions: thinkingOptions.length > 0 ? thinkingOptions : undefined,
-    defaultThinkingOptionId: defaultThinkingOptionId ?? undefined,
-    metadata: option.metadata,
-  }));
+  return modelOptions.map((option) => {
+    const contract = resolveACPModelThinkingContract({
+      meta: { supported: null, levels: null, defaultLevel: null },
+      sessionThinkingOptions,
+      sessionDefaultThinkingOptionId,
+      isCurrentModel: option.isDefault ?? false,
+    });
+    return {
+      provider,
+      id: option.id,
+      label: option.label,
+      description: option.description,
+      isDefault: option.isDefault,
+      thinkingOptions: contract.thinkingOptions,
+      defaultThinkingOptionId: contract.defaultThinkingOptionId,
+      metadata: option.metadata,
+    };
+  });
 }
 
 export function deriveFeaturesFromACP(
@@ -1848,6 +1963,16 @@ export class ACPAgentSession implements AgentSession, ACPClient {
 
     this.deliverTranslatedEvents(this.flushPendingUserMessage());
     const turnId = randomUUID();
+    this.logger.info(
+      {
+        agentId: this.agentId,
+        sessionId: this.sessionId,
+        turnId,
+        model: this.currentModel,
+        thinkingOptionId: this.thinkingOptionId,
+      },
+      "provider.acp.turn_start",
+    );
     const messageId = options?.clientMessageId ?? randomUUID();
     this.activeForegroundTurnId = turnId;
     this.fallbackAssistantMessageId = null;
@@ -2166,6 +2291,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
           modelId,
         });
         this.currentModel = modelId;
+        this.reconcileThinkingAfterModelChange();
         this.pushEvent({
           type: "model_changed",
           provider: this.provider,
@@ -2205,6 +2331,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       requestedValue: modelId,
       label: "model",
     });
+    this.reconcileThinkingAfterModelChange();
     this.pushEvent({
       type: "model_changed",
       provider: this.provider,
@@ -2212,11 +2339,33 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     });
   }
 
+  private reconcileThinkingAfterModelChange(): void {
+    if (this.thinkingOptionId === null) {
+      return;
+    }
+    const option = findSelectConfigOption({
+      configOptions: this.configOptions,
+      category: "thought_level",
+    });
+    const validIds = new Set(
+      option ? flattenSelectOptions(option.options).map((choice) => choice.value) : [],
+    );
+    if (validIds.has(this.thinkingOptionId)) {
+      return;
+    }
+    this.thinkingOptionId = option?.currentValue ?? null;
+    this.pushEvent({
+      type: "thinking_option_changed",
+      provider: this.provider,
+      thinkingOptionId: this.thinkingOptionId,
+    });
+  }
+
   async setThinkingOption(thinkingOptionId: string | null): Promise<void> {
     if (!this.connection || !this.sessionId) {
       throw new Error("ACP session not initialized");
     }
-    if (!thinkingOptionId) {
+    if (!thinkingOptionId || thinkingOptionId === "default") {
       this.thinkingOptionId = null;
       return;
     }
@@ -2238,6 +2387,12 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     });
     if (!option) {
       throw new Error(`${this.provider} does not expose ACP thought-level selection`);
+    }
+    const choice = findSelectConfigChoice({ option, value: thinkingOptionId });
+    if (!choice) {
+      throw new Error(
+        `${this.provider} thinking option '${thinkingOptionId}' is not available for model '${this.currentModel ?? "default"}'`,
+      );
     }
     const response = await this.connection.setSessionConfigOption({
       sessionId: this.sessionId,
@@ -3155,6 +3310,9 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   private runtimeInfo(): AgentRuntimeInfo {
+    // Live thought_level options describe this session's current model only.
+    // The app prefers them over the probe-default catalog for live controls.
+    const liveThinkingOptions = deriveSelectorOptions(this.configOptions, "thought_level");
     return {
       provider: this.provider,
       sessionId: this.sessionId,
@@ -3164,6 +3322,13 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       extra: {
         title: this.currentTitle,
         updatedAt: this.lastActivityAt,
+        ...(liveThinkingOptions.length > 0
+          ? {
+              liveThinkingOptions,
+              liveDefaultThinkingOptionId:
+                liveThinkingOptions.find((option) => option.isDefault)?.id ?? null,
+            }
+          : {}),
       },
     };
   }
