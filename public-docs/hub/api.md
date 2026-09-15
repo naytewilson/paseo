@@ -44,6 +44,7 @@ Each key has one or more selectable scopes:
 | `configuration:install`  | Install triggers or replace a legacy project's configuration.         |
 | `runs:dispatch`          | Dispatch a configured manual trigger for a project.                   |
 | `daemons:enroll`         | Issue a short-lived daemon enrollment token.                          |
+| `rooms:read`             | Read ANVIL Room projections and replay Room events.                   |
 
 API keys do not grant dashboard access. They cannot manage connections,
 projects, or organization members.
@@ -245,6 +246,60 @@ curl --fail-with-body -sS -X POST "$PASEO_HUB_URL/api/v1/manual-runs" \
 
 See [Hub workflows](/docs/hub/workflows) for input types, defaults, choices,
 rejected input, and manual invocation examples.
+
+## Room projection
+
+A Hub instance bound to an ANVIL deployment can project ANVIL Room state
+through the public API. Room state is owned by ANVIL authority; Hub reads it
+and never mints Room identities or writes Room data.
+
+```http
+GET /api/v1/rooms
+GET /api/v1/rooms/{roomId}
+GET /api/v1/rooms/{roomId}/events?after=0&limit=500
+```
+
+`GET /api/v1/rooms` lists the Rooms the Hub instance's bound ANVIL subject may
+read. `GET /api/v1/rooms/{roomId}` returns the projected Room record —
+durable `room_id`, `status`, and `latest_seq`, the committed high-water event
+sequence — plus active participants. `GET /api/v1/rooms/{roomId}/events`
+replays committed events with `room_seq` greater than `after`, ascending, at
+most `limit` per page (1–500, default 500). Reconnect by re-issuing
+`next_cursor` as `after`; identical cursors replay identical pages, and
+`has_more` reports whether `latest_seq` moved past the page.
+
+Two checks gate every request, and their `403` codes are distinct. The bearer
+credential must carry `rooms:read`; a missing scope returns
+`insufficient_scope`. Separately, the Hub instance's bound ANVIL subject must
+hold a durable `room.read` grant on the Room — global or room-scoped,
+unexpired, unrevoked. A missing grant returns `capability_denied`. An unknown
+`roomId` returns `404`.
+
+```json
+{
+  "room": {
+    "room_id": "00000000-0000-4000-8000-000000000000",
+    "project_ref": "my-project",
+    "status": "active",
+    "correlation_id": "00000000-0000-4000-8000-000000000000",
+    "latest_seq": 12,
+    "created_at": "2026-09-15T12:00:00.000Z",
+    "updated_at": "2026-09-15T12:00:00.000Z"
+  },
+  "participants": []
+}
+```
+
+The read seam is operator-configured per Hub instance. Both variables must be
+set together or the routes answer `503` `room_projection_unavailable`:
+
+| Variable | Shape |
+| -------- | ----- |
+| `PASEO_HUB_ANVIL_DATABASE_URL` | Postgres URL for the ANVIL database; use a dedicated read-only role. |
+| `PASEO_HUB_ANVIL_SUBJECT` | `agent:<uuid>`, `machine:<id>`, or `operator:<user>` — the subject `room.read` grants are checked against. |
+
+The `room.read` grant itself is issued in ANVIL's authority plane
+(`anvil.capability_grants`), not through Hub.
 
 ## Daemon enrollment
 
