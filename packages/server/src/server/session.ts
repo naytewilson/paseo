@@ -180,6 +180,8 @@ import { WorkspaceFilesSession } from "./session/files/workspace-files-session.j
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
 import { DaemonSession, type DaemonRuntimeConfig } from "./session/daemon/daemon-session.js";
+import { SieveSession } from "./sieve/sieve-session.js";
+import type { SieveLensFeed } from "./sieve/feed.js";
 import type { DaemonWebSocketRuntimeDiagnosticSnapshot } from "./session/daemon/diagnostics.js";
 import type { HubRelationshipManagement } from "./hub/relationship-controller.js";
 import { HubExecutionController } from "./hub/execution-controller.js";
@@ -552,6 +554,10 @@ export interface SessionOptions {
   daemonVersion?: string;
   daemonRuntimeConfig?: DaemonRuntimeConfig;
   getWebSocketRuntimeMetrics?: () => DaemonWebSocketRuntimeDiagnosticSnapshot | null;
+  // The SIEVE Lens feed seam. No daemon ships one today; sessions answer every
+  // sieve.* request with a typed unavailable disposition until an upstream
+  // authority-plane projection is attached here.
+  sieveLensFeed?: SieveLensFeed | null;
 }
 
 export type SessionLifecycleIntent =
@@ -752,6 +758,7 @@ export class Session {
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
   private readonly daemonSession: DaemonSession;
+  private readonly sieveSession: SieveSession;
   private readonly hubExecutionController: HubExecutionController | null;
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly agentRequests: Pick<AgentRequests, "create" | "send">;
@@ -986,6 +993,13 @@ export class Session {
       logger: this.sessionLogger,
       hubRelationships: options.hubRelationships,
       reloadConfig: () => daemonConfigStore.reload(),
+    });
+    this.sieveSession = new SieveSession({
+      host: {
+        emit: (msg) => this.emit(msg),
+      },
+      feed: options.sieveLensFeed,
+      logger: this.sessionLogger,
     });
     this.hubExecutionController = options.hubExecutionAgents
       ? new HubExecutionController({
@@ -2013,6 +2027,7 @@ export class Session {
       this.dispatchPluginMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
+      this.dispatchSieveMessage(msg) ??
       this.dispatchMiscMessage(msg);
     if (promise) await promise;
   }
@@ -2728,6 +2743,19 @@ export class Session {
         return this.scheduleSession.handleScheduleRunOnceRequest(msg);
       case "schedule/update":
         return this.scheduleSession.handleScheduleUpdateRequest(msg);
+      default:
+        return undefined;
+    }
+  }
+
+  private dispatchSieveMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "sieve.status.get.request":
+        return this.sieveSession.handleStatusGetRequest(msg);
+      case "sieve.status.subscribe.request":
+        return this.sieveSession.handleStatusSubscribeRequest(msg);
+      case "sieve.status.unsubscribe.request":
+        return this.sieveSession.handleStatusUnsubscribeRequest(msg);
       default:
         return undefined;
     }
@@ -7923,6 +7951,8 @@ export class Session {
     this.terminalController.dispose();
 
     this.checkoutSession.cleanup();
+
+    await this.sieveSession.dispose();
 
     this.workspaceGitObserver.dispose();
     this.workspaceFilesSession.dispose();
