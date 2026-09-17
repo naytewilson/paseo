@@ -1,5 +1,6 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
+import type { CompletedRunObserver } from "../decision-fabric/observer.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
@@ -290,6 +291,7 @@ export interface CreateAgentOptions {
 
 export interface AgentManagerOptions {
   pluginLifecycle?: PluginLifecycle;
+  completedRunObserver?: CompletedRunObserver;
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
   idFactory?: () => string;
@@ -690,6 +692,7 @@ function detachedAgentLabelPatch(labels: Record<string, string>): AgentLabelPatc
 
 export class AgentManager {
   private readonly pluginLifecycle: PluginLifecycle | undefined;
+  private readonly completedRunObserver: CompletedRunObserver | undefined;
   private readonly clients = new Map<AgentProvider, AgentClient>();
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
@@ -731,6 +734,7 @@ export class AgentManager {
 
   constructor(options: AgentManagerOptions) {
     this.pluginLifecycle = options.pluginLifecycle;
+    this.completedRunObserver = options.completedRunObserver;
     this.idFactory = options?.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
@@ -4940,6 +4944,24 @@ export class AgentManager {
         event,
         this.timelineStore.getItems(agentId),
       );
+    }
+    if (this.completedRunObserver && agent && !agent.internal && event.type === "turn_completed") {
+      const task = this.completedRunObserver
+        .observe({
+          agent: {
+            id: agent.id,
+            provider: agent.provider,
+            cwd: agent.cwd,
+            workspaceId: agent.workspaceId,
+            title: agent.config.title ?? null,
+          },
+          event,
+          rows: this.timelineStore.has(agentId) ? this.timelineStore.getRows(agentId) : [],
+        })
+        .catch((error) => {
+          this.logger.warn({ err: error, agentId }, "Completed-run decision observation failed");
+        });
+      this.trackBackgroundTask(task);
     }
   }
 

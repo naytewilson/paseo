@@ -24,6 +24,7 @@ import { resolveSpeechConfig } from "./speech/speech-config-resolver.js";
 import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { mergeHostnames, parseHostnamesEnv, type HostnamesConfig } from "./hostnames.js";
 import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
+import { resolveDecisionFabricConfig } from "./decision-fabric/config.js";
 
 const DEFAULT_PORT = 6767;
 const DEFAULT_RELAY_ENDPOINT = "relay.paseo.sh:443";
@@ -637,6 +638,7 @@ export function resolveConfigFromPersisted(
     voiceLlmProviderExplicit: voiceLlm.providerExplicit,
     voiceLlmModel: voiceLlm.model,
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
+    decisionFabric: resolveDecisionFabricConfig({ env, persisted }),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
     metadataGeneration: persisted.agents?.metadataGeneration,
     providerOverrides,
@@ -715,6 +717,15 @@ function resolveCoreDaemonOverridePaths(
   }
   if (env.PASEO_APP_BASE_URL !== undefined) paths.push("app.baseUrl");
   if (env.PASEO_PASSWORD?.trim()) paths.push("daemon.auth.password");
+  if (parseBooleanEnv(env.PASEO_JEV_DECISION_FABRIC) !== undefined) {
+    paths.push("daemon.decisionFabric.enabled");
+  }
+  if (env.PASEO_JEV_DECISION_FABRIC_SOCKET !== undefined || env.ANVIL_JEV_SOCKET !== undefined) {
+    paths.push("daemon.decisionFabric.socketPath");
+  }
+  if (env.PASEO_JEV_DECISION_FABRIC_TIMEOUT_MS !== undefined) {
+    paths.push("daemon.decisionFabric.timeoutMs");
+  }
   return paths;
 }
 

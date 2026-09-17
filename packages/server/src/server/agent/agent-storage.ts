@@ -42,6 +42,58 @@ const PERSISTENCE_HANDLE_SCHEMA = z
   .nullable()
   .optional();
 
+const ADVISORY_JEV_OBSERVED_SCHEMA = z
+  .object({
+    status: z.literal("observed"),
+    contractId: z.string(),
+    contractVersion: z.string(),
+    contractDigest: z.string().optional(),
+    requestId: z.string(),
+    sourceRunId: z.string(),
+    turnId: z.string().nullable(),
+    observedAt: z.string(),
+    policyMode: z.literal("SHADOW_ONLY"),
+    policyOutcome: z.string(),
+    policyVersion: z.string().optional(),
+    escalationReason: z.string().optional(),
+    requestedModel: z.string(),
+    effectiveModel: z.string(),
+    answers: z.record(z.string(), z.unknown()),
+    receiptId: z.string(),
+    receiptDigest: z.string(),
+  })
+  .strict();
+
+const ADVISORY_JEV_FAILED_SCHEMA = z
+  .object({
+    status: z.literal("failed"),
+    contractId: z.string(),
+    contractVersion: z.string(),
+    requestId: z.string(),
+    turnId: z.string().nullable(),
+    attemptedAt: z.string(),
+    error: z
+      .object({
+        code: z.string(),
+        message: z.string(),
+        retryable: z.boolean().optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+const STORED_AGENT_ADVISORY_SCHEMA = z
+  .object({
+    jev: z
+      .discriminatedUnion("status", [ADVISORY_JEV_OBSERVED_SCHEMA, ADVISORY_JEV_FAILED_SCHEMA])
+      .optional(),
+  })
+  .strict();
+
+export type StoredAgentAdvisoryJev = NonNullable<
+  z.infer<typeof STORED_AGENT_ADVISORY_SCHEMA>["jev"]
+>;
+
 const STORED_AGENT_SCHEMA = z.object({
   id: z.string(),
   provider: z.string(),
@@ -75,6 +127,7 @@ const STORED_AGENT_SCHEMA = z.object({
   internal: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
   owner: AgentOwnerSchema.optional(),
+  advisory: STORED_AGENT_ADVISORY_SCHEMA.optional(),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -161,7 +214,7 @@ export class AgentStorage {
 
   private queueRecordMutation(
     agentId: string,
-    mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord,
+    mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord | null,
   ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
     const next = prev.then(async () => {
@@ -170,6 +223,9 @@ export class AgentStorage {
       }
 
       const record = mutate(this.cache.get(agentId) ?? null);
+      if (record === null) {
+        return undefined;
+      }
       await this.writeRecord(record);
       return undefined;
     });
@@ -259,8 +315,29 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
+      if (existing && existing.advisory !== undefined) {
+        record.advisory = existing.advisory;
+      }
       return record;
     });
+  }
+
+  /**
+   * Attach a shadow observation under the `advisory.jev` namespace. Advisory
+   * data is persisted server-side only and never feeds back into dispatch,
+   * lifecycle, or wire payloads. Returns false when no record exists yet.
+   */
+  async recordAdvisoryJev(agentId: string, jev: StoredAgentAdvisoryJev): Promise<boolean> {
+    await this.load();
+    let attached = false;
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) {
+        return null;
+      }
+      attached = true;
+      return { ...existing, advisory: { ...existing.advisory, jev } };
+    });
+    return attached;
   }
 
   async setTitle(agentId: string, title: string): Promise<void> {

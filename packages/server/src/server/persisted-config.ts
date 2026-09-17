@@ -293,6 +293,14 @@ export const PersistedConfigSchema = z
           })
           .strict()
           .optional(),
+        decisionFabric: z
+          .object({
+            enabled: z.boolean().optional(),
+            socketPath: z.string().min(1).optional(),
+            timeoutMs: z.number().int().positive().optional(),
+          })
+          .strict()
+          .optional(),
         auth: DaemonAuthSchema.optional(),
       })
       .strict()

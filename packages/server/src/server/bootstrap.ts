@@ -131,6 +131,12 @@ import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
+import { createDecisionFabricClient } from "./decision-fabric/client.js";
+import type { DecisionFabricConfig } from "./decision-fabric/config.js";
+import {
+  createCompletedRunObserver,
+  type CompletedRunObserver,
+} from "./decision-fabric/observer.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import {
@@ -437,6 +443,7 @@ export interface PaseoDaemonConfig {
   dictationFinalTimeoutMs?: number;
   downloadTokenTtlMs?: number;
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
+  decisionFabric?: DecisionFabricConfig;
   providerCatalogRefreshTimeoutMs?: number;
   metadataGeneration?: {
     providers?: Array<{
@@ -563,6 +570,28 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
   }
 
   return initialConfig;
+}
+
+/**
+ * Machine-local shadow observation. Opt-in only; advisory writes land under
+ * `advisory.jev` on the stored record and never feed dispatch or lifecycle.
+ */
+function createDecisionFabricObserver(
+  config: DecisionFabricConfig | undefined,
+  sink: AgentStorage,
+  logger: Logger,
+): CompletedRunObserver | undefined {
+  if (!config?.enabled) {
+    return undefined;
+  }
+  return createCompletedRunObserver({
+    client: createDecisionFabricClient({
+      socketPath: config.socketPath,
+      timeoutMs: config.timeoutMs,
+    }),
+    sink,
+    logger,
+  });
 }
 
 export async function createPaseoDaemon(
@@ -919,8 +948,14 @@ export async function createPaseoDaemon(
     if (git) configureGitProcessPolicy(git);
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
+  const completedRunObserver = createDecisionFabricObserver(
+    config.decisionFabric,
+    agentStorage,
+    logger,
+  );
   const agentManager = new AgentManager({
     pluginLifecycle: pluginRuntime,
+    completedRunObserver,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
