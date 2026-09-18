@@ -23,6 +23,10 @@ import {
   SessionInboundMessageSchema,
   type ActiveTurnBehavior,
   type ServerInfoStatusPayload,
+  type SieveStatusGetPayload,
+  type SieveStatusSubscribePayload,
+  type SieveStatusUnsubscribePayload,
+  type SieveStreamCursor,
 } from "@getpaseo/protocol/messages";
 import { validateWSOutboundMessage } from "@getpaseo/protocol/validation/ws-outbound";
 import type {
@@ -4903,6 +4907,41 @@ export class DaemonClient {
       requestId,
       message: {
         type: "diagnostics.request",
+      },
+    });
+  }
+
+  async getSieveLensStatus(requestId?: string): Promise<SieveStatusGetPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "sieve.status.get.request",
+      },
+    });
+  }
+
+  async subscribeSieveLensStatus(options?: {
+    after?: SieveStreamCursor;
+    requestId?: string;
+  }): Promise<SieveStatusSubscribePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "sieve.status.subscribe.request",
+        ...(options?.after ? { after: options.after } : {}),
+      },
+    });
+  }
+
+  async unsubscribeSieveLensStatus(
+    subscriptionId: string,
+    requestId?: string,
+  ): Promise<SieveStatusUnsubscribePayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "sieve.status.unsubscribe.request",
+        subscriptionId,
       },
     });
   }

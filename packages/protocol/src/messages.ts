@@ -59,7 +59,57 @@ import {
   BrowserAutomationExecuteRequestSchema,
   BrowserAutomationExecuteResponseSchema,
 } from "./browser-automation/rpc-schemas.js";
+import {
+  SieveStatusGetRequestSchema,
+  SieveStatusGetResponseSchema,
+  SieveStatusSubscribeRequestSchema,
+  SieveStatusSubscribeResponseSchema,
+  SieveStatusUnsubscribeRequestSchema,
+  SieveStatusUnsubscribeResponseSchema,
+  SieveStatusEventSchema,
+} from "./sieve.js";
 import { BrowserAutomationHostCapabilitySchema } from "./browser-automation/capabilities.js";
+export {
+  SieveModeSchema,
+  SieveProvenanceSchema,
+  SieveObservationSchema,
+  SieveRunIdentitySchema,
+  SieveSavingsSchema,
+  SieveCacheStateSchema,
+  SieveFallbackSchema,
+  SieveStatusSnapshotSchema,
+  SieveUnavailableReasonSchema,
+  SieveLensStatusSchema,
+  SieveStreamCursorSchema,
+  SieveStatusGetRequestSchema,
+  SieveStatusGetResponseSchema,
+  SieveStatusSubscribeRequestSchema,
+  SieveStatusSubscribeResponseSchema,
+  SieveStatusUnsubscribeRequestSchema,
+  SieveStatusUnsubscribeResponseSchema,
+  SieveStatusEventSchema,
+  type SieveMode,
+  type SieveProvenance,
+  type SieveObservation,
+  type SieveRunIdentity,
+  type SieveSavings,
+  type SieveCacheState,
+  type SieveFallback,
+  type SieveStatusSnapshot,
+  type SieveUnavailableReason,
+  type SieveLensStatus,
+  type SieveStreamCursor,
+  type SieveStatusGetRequest,
+  type SieveStatusGetResponse,
+  type SieveStatusGetPayload,
+  type SieveStatusSubscribeRequest,
+  type SieveStatusSubscribeResponse,
+  type SieveStatusSubscribePayload,
+  type SieveStatusUnsubscribeRequest,
+  type SieveStatusUnsubscribeResponse,
+  type SieveStatusUnsubscribePayload,
+  type SieveStatusEvent,
+} from "./sieve.js";
 import {
   PaseoConfigRawSchema,
   PaseoLifecycleCommandRawSchema,
@@ -3263,6 +3313,9 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   LoopInspectRequestSchema,
   LoopLogsRequestSchema,
   LoopStopRequestSchema,
+  SieveStatusGetRequestSchema,
+  SieveStatusSubscribeRequestSchema,
+  SieveStatusUnsubscribeRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -3589,6 +3642,11 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // COMPAT(sieveLens): added in v0.8.0, remove gate after 2027-03-17 once
+        // the supported daemon floor advertises the sieve.* read surface.
+        // The flag means "this daemon speaks sieve.*"; SIEVE data availability
+        // is reported in-band by the typed status disposition.
+        sieveLens: z.boolean().optional(),
       })
       .optional(),
   })
@@ -6669,6 +6727,10 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   LoopInspectResponseSchema,
   LoopLogsResponseSchema,
   LoopStopResponseSchema,
+  SieveStatusGetResponseSchema,
+  SieveStatusSubscribeResponseSchema,
+  SieveStatusUnsubscribeResponseSchema,
+  SieveStatusEventSchema,
   DaemonUpdateProgressMessageSchema,
   DaemonUpdateResponseSchema,
 ]);

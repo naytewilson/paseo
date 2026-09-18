@@ -54,6 +54,8 @@ import type {
   FetchAgentTimelineProjection,
   WaitForFinishResult,
 } from "./daemon-client.js";
+export { SieveLensClient } from "./sieve-client.js";
+export type { SieveLensTransport, SieveLensUpdate } from "./sieve-client.js";
 
 /**
  * Coding turns routinely run for minutes, so the handle waits far longer than

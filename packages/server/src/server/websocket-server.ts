@@ -1776,6 +1776,9 @@ export class VoiceAssistantWebSocketServer {
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: true,
+        // COMPAT(sieveLens): added in v0.8.0, remove gate after 2027-03-17 once
+        // the supported daemon floor advertises the sieve.* read surface.
+        sieveLens: true,
       },
     };
   }

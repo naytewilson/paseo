@@ -168,6 +168,13 @@ const INBOUND_PERMISSION = {
   set_daemon_config_request: "daemon.manage",
   set_voice_mode: "workspace.write",
   shutdown_server_request: "daemon.manage",
+  // SIEVE Lens is daemon-scoped observation, classified under the existing
+  // read-class permission. A dedicated sieve.read remains the terminal shape;
+  // introducing it requires a COMPAT filter on server_info.permissions because
+  // an unknown enum value fails old clients' strict parse of the handshake.
+  "sieve.status.get.request": "daemon.read",
+  "sieve.status.subscribe.request": "daemon.read",
+  "sieve.status.unsubscribe.request": "daemon.read",
   start_workspace_script_request: "workspace.write",
   stash_list_request: "workspace.read",
   stash_pop_request: "workspace.write",
@@ -380,6 +387,10 @@ const OUTBOUND_PERMISSION = {
   set_agent_thinking_response: "workspace.write",
   set_daemon_config_response: "daemon.manage",
   set_voice_mode_response: "workspace.write",
+  "sieve.status.event": "daemon.read",
+  "sieve.status.get.response": "daemon.read",
+  "sieve.status.subscribe.response": "daemon.read",
+  "sieve.status.unsubscribe.response": "daemon.read",
   start_workspace_script_response: "workspace.write",
   stash_list_response: "workspace.read",
   stash_pop_response: "workspace.read",
