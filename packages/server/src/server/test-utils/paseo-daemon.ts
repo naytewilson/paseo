@@ -6,6 +6,7 @@ import pino from "pino";
 import {
   createPaseoDaemon,
   type PaseoDaemonConfig,
+  type PaseoDaemonDependencies,
   type PaseoOpenAIConfig,
   type PaseoSpeechConfig,
 } from "../bootstrap.js";
@@ -50,6 +51,8 @@ interface TestPaseoDaemonOptions {
   autoArchiveAfterMerge?: boolean;
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
   plugins?: PaseoDaemonConfig["plugins"];
+  sieve?: PaseoDaemonConfig["sieve"];
+  sieveLensFeed?: PaseoDaemonDependencies["sieveLensFeed"];
 }
 
 export interface TestPaseoDaemon {
@@ -104,6 +107,7 @@ export async function createTestPaseoDaemon(
         daemonStatusRpc: options.daemonStatusRpcCapability,
         relayConfig: options.relayConfigCapability,
       },
+      sieveLensFeed: options.sieveLensFeed,
     });
     try {
       await startDaemonWithTimeout(daemon, TEST_DAEMON_START_TIMEOUT_MS);
@@ -203,6 +207,7 @@ async function prepareTestDaemonConfig(
     autoArchiveAfterMerge: options.autoArchiveAfterMerge,
     pluginsEnabled: options.pluginsEnabled,
     plugins: options.plugins,
+    sieve: options.sieve,
   };
   return { config, paseoHomeRoot, paseoHome, staticDir };
 }

@@ -508,6 +508,20 @@ function resolveBrowserToolsEnabled(persisted: ReturnType<typeof loadPersistedCo
 }
 
 /**
+ * The SIEVE Lens feed endpoint. No default: an absent value leaves no feed
+ * attached and the daemon keeps answering sieve.* with `no_feed_attached`
+ * rather than guessing at a local topology.
+ */
+function resolveSieveConfig(
+  env: NodeJS.ProcessEnv,
+  persisted: ReturnType<typeof loadPersistedConfig>,
+): PaseoDaemonConfig["sieve"] {
+  const baseUrl = env.PASEO_SIEVE_URL ?? persisted.daemon?.sieve?.baseUrl;
+  const trimmed = baseUrl?.trim();
+  return trimmed ? { baseUrl: trimmed } : undefined;
+}
+
+/**
  * Both profile lists stay `undefined` when absent rather than defaulting to an
  * empty array: for terminal profiles that is what selects the built-in
  * defaults, so an empty array has to keep meaning "the user removed them all".
@@ -608,6 +622,7 @@ export function resolveConfigFromPersisted(
     mcpInjectIntoAgents,
     browserToolsEnabled,
     git: resolveGitProcessConfig(env, persisted),
+    sieve: resolveSieveConfig(env, persisted),
     autoArchiveAfterMerge,
     enableTerminalAgentHooks: persisted.daemon?.enableTerminalAgentHooks ?? false,
     appendSystemPrompt,
@@ -715,6 +730,7 @@ function resolveCoreDaemonOverridePaths(
   }
   if (env.PASEO_APP_BASE_URL !== undefined) paths.push("app.baseUrl");
   if (env.PASEO_PASSWORD?.trim()) paths.push("daemon.auth.password");
+  if (env.PASEO_SIEVE_URL !== undefined) paths.push("daemon.sieve.baseUrl");
   return paths;
 }
 

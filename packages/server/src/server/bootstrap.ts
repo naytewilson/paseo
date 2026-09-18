@@ -230,6 +230,8 @@ import {
 import { DaemonExecutions } from "./hub/daemon-executions.js";
 import { PluginService } from "./plugins/index.js";
 import { ManagedPluginSources } from "./plugins/managed-source.js";
+import type { SieveLensFeed } from "./sieve/feed.js";
+import { SieveHttpLensFeed } from "./sieve/sieve-http-feed.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
 const MCP_DEBUG_SECRET = "[redacted]";
@@ -423,6 +425,12 @@ export interface PaseoDaemonConfig {
     publicBaseUrl: string | null;
     standaloneListen: string | null;
   };
+  // The local SIEVE read surface the Lens feed attaches to. Absent means the
+  // daemon ships no feed and answers sieve.* with `no_feed_attached` — there
+  // is no default endpoint because topology is operator-owned.
+  sieve?: {
+    baseUrl: string;
+  };
   webUi?: {
     enabled: boolean;
     distDir: string | null;
@@ -481,6 +489,9 @@ export interface PaseoDaemonDependencies {
     daemonStatusRpc?: boolean;
     relayConfig?: boolean;
   };
+  // Test seam: inject the Lens feed directly instead of building one from
+  // config.sieve.baseUrl. `null` pins the no-feed configuration explicitly.
+  sieveLensFeed?: SieveLensFeed | null;
 }
 
 function createBootstrapManagedProcessRegistry(
@@ -563,6 +574,32 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
   }
 
   return initialConfig;
+}
+
+/**
+ * Pick the SIEVE Lens feed for this daemon. An injected dependency wins;
+ * otherwise the feed is built from the configured endpoint, and absent
+ * config attaches nothing — sessions then answer sieve.* with the honest
+ * `no_feed_attached` disposition.
+ */
+function resolveSieveLensFeed(
+  config: PaseoDaemonConfig,
+  dependencies: PaseoDaemonDependencies,
+  logger: Logger,
+): { sieveLensFeed: SieveLensFeed | null; ownSieveLensFeed: SieveHttpLensFeed | null } {
+  if (dependencies.sieveLensFeed !== undefined) {
+    if (dependencies.sieveLensFeed) {
+      logger.info({ injected: true }, "SIEVE Lens feed attached");
+    }
+    return { sieveLensFeed: dependencies.sieveLensFeed, ownSieveLensFeed: null };
+  }
+  const ownSieveLensFeed = config.sieve?.baseUrl
+    ? new SieveHttpLensFeed({ baseUrl: config.sieve.baseUrl, logger })
+    : null;
+  if (ownSieveLensFeed) {
+    logger.info({ baseUrl: config.sieve?.baseUrl }, "SIEVE Lens feed attached");
+  }
+  return { sieveLensFeed: ownSieveLensFeed, ownSieveLensFeed };
 }
 
 export async function createPaseoDaemon(
@@ -1568,6 +1605,8 @@ export async function createPaseoDaemon(
   });
   logger.info({ elapsed: elapsed() }, "Speech service created");
 
+  const { sieveLensFeed, ownSieveLensFeed } = resolveSieveLensFeed(config, dependencies, logger);
+
   logger.info({ elapsed: elapsed() }, "Bootstrap complete, ready to start listening");
 
   const start = async () => {
@@ -1717,6 +1756,7 @@ export async function createPaseoDaemon(
               pluginRuntime,
               orchestrationSkills,
               workspaceLabelService,
+              sieveLensFeed,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
@@ -1796,6 +1836,7 @@ export async function createPaseoDaemon(
     if (wsServer) {
       await wsServer.close();
     }
+    ownSieveLensFeed?.stop();
     await serviceProxy.stopStandalone();
     // Force-drop remaining sockets so httpServer.close() resolves promptly.
     // We've already closed wsServer (which sent ws-layer close frames) and
