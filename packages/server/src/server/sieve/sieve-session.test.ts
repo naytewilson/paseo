@@ -222,6 +222,110 @@ describe("SieveSession with a feed attached", () => {
     expect(listeners.size).toBe(0);
   });
 
+  test("subscribe replays events delivered during subscribe after the response", async () => {
+    const { host, messages } = createHost();
+    const { feed } = createFeed();
+    const replayed: SieveLensFeedSnapshot = {
+      status: OK_STATUS,
+      cursor: { epoch: "epoch-1", seq: 8 },
+      observedAt: "2026-09-17T00:00:01.000Z",
+    };
+    feed.subscribe = vi.fn(async ({ onEvent }) => {
+      // A feed resuming from a cursor replays buffered events synchronously —
+      // before the subscription handle exists.
+      onEvent(replayed);
+      return { subscriptionId: "sub_1", cursor: { epoch: "epoch-1", seq: 8 } };
+    });
+    const session = new SieveSession({ host, feed, logger });
+
+    await session.handleStatusSubscribeRequest({
+      type: "sieve.status.subscribe.request",
+      requestId: "req_sub",
+      after: { epoch: "epoch-1", seq: 3 },
+    });
+
+    expect(messages[0]).toMatchObject({
+      type: "sieve.status.subscribe.response",
+      payload: { accepted: true, subscriptionId: "sub_1" },
+    });
+    expect(messages[1]).toMatchObject({
+      type: "sieve.status.event",
+      payload: { subscriptionId: "sub_1", cursor: { epoch: "epoch-1", seq: 8 } },
+    });
+  });
+
+  test("events emitted while the response is pending are emitted after it", async () => {
+    const { host, messages } = createHost();
+    const { feed, listeners } = createFeed();
+    let resolveStatus: (value: SieveLensFeedSnapshot) => void = () => {};
+    feed.getStatus = vi.fn(
+      () =>
+        new Promise<SieveLensFeedSnapshot>((resolve) => {
+          resolveStatus = resolve;
+        }),
+    );
+    const session = new SieveSession({ host, feed, logger });
+
+    const pending = session.handleStatusSubscribeRequest({
+      type: "sieve.status.subscribe.request",
+      requestId: "req_sub",
+    });
+    // Let feed.subscribe resolve so the listener is registered before firing.
+    await new Promise((resolve) => setImmediate(resolve));
+    listeners.get("sub_1")?.({
+      status: OK_STATUS,
+      cursor: { epoch: "epoch-1", seq: 8 },
+      observedAt: "2026-09-17T00:00:01.000Z",
+    });
+    resolveStatus({
+      status: OK_STATUS,
+      cursor: { epoch: "epoch-1", seq: 7 },
+      observedAt: "2026-09-17T00:00:00.000Z",
+    });
+    await pending;
+
+    expect(messages[0].type).toBe("sieve.status.subscribe.response");
+    expect(messages[1]).toMatchObject({
+      type: "sieve.status.event",
+      payload: { subscriptionId: "sub_1", cursor: { epoch: "epoch-1", seq: 8 } },
+    });
+  });
+
+  test("a status read failure after subscribe reports membership, not refusal", async () => {
+    const { host, messages } = createHost();
+    const { feed } = createFeed();
+    feed.getStatus = vi.fn(async () => {
+      throw new Error("upstream lost");
+    });
+    const session = new SieveSession({ host, feed, logger });
+
+    await session.handleStatusSubscribeRequest({
+      type: "sieve.status.subscribe.request",
+      requestId: "req_sub",
+    });
+
+    // The feed granted membership — reporting accepted:false would strand it.
+    expect(messages[0]).toMatchObject({
+      type: "sieve.status.subscribe.response",
+      payload: {
+        accepted: true,
+        subscriptionId: "sub_1",
+        status: {
+          state: "unavailable",
+          reason: "feed_unreachable",
+          detail: "upstream lost",
+        },
+      },
+    });
+
+    await session.handleStatusUnsubscribeRequest({
+      type: "sieve.status.unsubscribe.request",
+      requestId: "req_unsub",
+      subscriptionId: "sub_1",
+    });
+    expect(feed.unsubscribe).toHaveBeenCalledWith("sub_1");
+  });
+
   test("subscribe failure reports feed_unreachable and accepts nothing", async () => {
     const { host, messages } = createHost();
     const feed: SieveLensFeed = {

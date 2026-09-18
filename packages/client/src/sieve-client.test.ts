@@ -107,8 +107,7 @@ describe("SieveLensClient", () => {
     });
     transport.setConnectionState({ status: "disconnected" });
     transport.setConnectionState({ status: "connected" });
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
     expect(transport.subscribedWith[1]).toEqual({ epoch: "e1", seq: 5 });
   });
 
@@ -161,6 +160,66 @@ describe("SieveLensClient", () => {
     const client = new SieveLensClient(transport);
     await client.setSubscribed(true);
     await client.setSubscribed(false);
+    expect(transport.unsubscribed).toEqual(["sub-1"]);
+  });
+
+  it("releases the prior server-side membership after reconnect", async () => {
+    const transport = new FakeTransport();
+    const client = new SieveLensClient(transport);
+    await client.setSubscribed(true);
+
+    transport.nextSubscribeResponse = {
+      requestId: "r",
+      accepted: true,
+      subscriptionId: "sub-2",
+      cursor: { epoch: "e1", seq: 5 },
+      status: UNAVAILABLE,
+      observedAt: "2026-09-17T00:00:01Z",
+    };
+    transport.setConnectionState({ status: "disconnected" });
+    transport.setConnectionState({ status: "connected" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // A daemon session that survived the socket drop still held sub-1; the
+    // resubscribe released it rather than orphaning it.
+    expect(transport.unsubscribed).toEqual(["sub-1"]);
+    expect(transport.subscribedWith).toHaveLength(2);
+  });
+
+  it("releases a membership granted after demand was withdrawn mid-flight", async () => {
+    const transport = new FakeTransport();
+    let resolveSubscribe: (payload: SieveStatusSubscribePayload) => void = () => {};
+    transport.subscribeSieveLensStatus = () =>
+      new Promise<SieveStatusSubscribePayload>((resolve) => {
+        resolveSubscribe = resolve;
+      });
+    const client = new SieveLensClient(transport);
+
+    const pending = client.setSubscribed(true);
+    // Let sync reach the in-flight subscribe before demand is withdrawn.
+    await new Promise((resolve) => setImmediate(resolve));
+    const cancelled = client.setSubscribed(false);
+    resolveSubscribe({
+      requestId: "r",
+      accepted: true,
+      subscriptionId: "sub-1",
+      cursor: { epoch: "e1", seq: 0 },
+      status: UNAVAILABLE,
+      observedAt: "2026-09-17T00:00:00Z",
+    });
+    await pending;
+    await cancelled;
+
+    expect(transport.unsubscribed).toEqual(["sub-1"]);
+  });
+
+  it("releases a held membership on dispose", async () => {
+    const transport = new FakeTransport();
+    const client = new SieveLensClient(transport);
+    await client.setSubscribed(true);
+
+    client.dispose();
+
     expect(transport.unsubscribed).toEqual(["sub-1"]);
   });
 });

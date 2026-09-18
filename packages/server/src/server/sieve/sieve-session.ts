@@ -6,7 +6,7 @@ import type {
   SieveStatusUnsubscribeRequest,
   SessionOutboundMessage,
 } from "../messages.js";
-import type { SieveLensFeed } from "./feed.js";
+import type { SieveLensFeed, SieveLensFeedSnapshot, SieveLensFeedSubscription } from "./feed.js";
 
 export interface SieveSessionHost {
   emit(msg: SessionOutboundMessage): void;
@@ -71,33 +71,33 @@ export class SieveSession {
       });
       return;
     }
-    try {
-      const subscription = await feed.subscribe({
-        ...(msg.after ? { after: msg.after } : {}),
-        onEvent: (event) => {
-          this.host.emit({
-            type: "sieve.status.event",
-            payload: {
-              subscriptionId: subscription.subscriptionId,
-              cursor: event.cursor,
-              status: event.status,
-              observedAt: event.observedAt,
-            },
-          });
+    // A feed resuming from a cursor may replay buffered events synchronously
+    // inside subscribe() — before the subscription handle exists — or while the
+    // status read below is still pending. Buffering until after the response
+    // keeps the client from seeing events for a subscriptionId it cannot know
+    // yet, which it would have to drop as foreign.
+    let subscription: SieveLensFeedSubscription | null = null;
+    let responseSent = false;
+    const earlyEvents: SieveLensFeedSnapshot[] = [];
+    const emitEvent = (event: SieveLensFeedSnapshot): void => {
+      if (!subscription || !responseSent) {
+        earlyEvents.push(event);
+        return;
+      }
+      this.host.emit({
+        type: "sieve.status.event",
+        payload: {
+          subscriptionId: subscription.subscriptionId,
+          cursor: event.cursor,
+          status: event.status,
+          observedAt: event.observedAt,
         },
       });
-      this.subscriptions.set(subscription.subscriptionId, feed);
-      const current = await feed.getStatus();
-      this.host.emit({
-        type: "sieve.status.subscribe.response",
-        payload: {
-          requestId: msg.requestId,
-          accepted: true,
-          subscriptionId: subscription.subscriptionId,
-          cursor: subscription.cursor,
-          status: current.status,
-          observedAt: this.now(),
-        },
+    };
+    try {
+      subscription = await feed.subscribe({
+        ...(msg.after ? { after: msg.after } : {}),
+        onEvent: emitEvent,
       });
     } catch (error) {
       this.logger.error({ err: error }, "SIEVE feed refused subscription");
@@ -114,6 +114,37 @@ export class SieveSession {
           observedAt: this.now(),
         },
       });
+      return;
+    }
+    this.subscriptions.set(subscription.subscriptionId, feed);
+    // Membership exists from here on — the response must report it even when
+    // the status read fails, or the daemon would hold a subscription the
+    // client was told it never got.
+    let status: SieveLensStatus;
+    try {
+      status = (await feed.getStatus()).status;
+    } catch (error) {
+      this.logger.error({ err: error }, "SIEVE feed status read failed");
+      status = {
+        state: "unavailable",
+        reason: "feed_unreachable",
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+    this.host.emit({
+      type: "sieve.status.subscribe.response",
+      payload: {
+        requestId: msg.requestId,
+        accepted: true,
+        subscriptionId: subscription.subscriptionId,
+        cursor: subscription.cursor,
+        status,
+        observedAt: this.now(),
+      },
+    });
+    responseSent = true;
+    for (const event of earlyEvents.splice(0)) {
+      emitEvent(event);
     }
   }
 

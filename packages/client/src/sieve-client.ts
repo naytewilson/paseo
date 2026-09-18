@@ -42,6 +42,11 @@ export interface SieveLensUpdate {
 export class SieveLensClient {
   private desired = false;
   private subscriptionId: string | null = null;
+  // Memberships the daemon may still hold that this client no longer wants —
+  // e.g. a subscription granted on a session that survived a socket drop, or
+  // one granted after demand was withdrawn mid-flight. Released on the next
+  // sync; the server rejects unknown ids harmlessly, so retrying is cheap.
+  private readonly orphanedIds = new Set<string>();
   private lastCursor: SieveStreamCursor | null = null;
   private lastUpdate: SieveLensUpdate | null = null;
   private readonly listeners = new Set<(update: SieveLensUpdate) => void>();
@@ -52,11 +57,15 @@ export class SieveLensClient {
   constructor(private readonly transport: SieveLensTransport) {
     this.unsubscribeTransport = transport.subscribeConnectionStatus((state) => {
       if (state.status === "connected") {
-        // Membership died with the socket; re-declare demand on the new
-        // connection, resuming from the last cursor we observed.
+        // Re-declare demand on the new connection, resuming from the last
+        // cursor we observed.
+        if (this.subscriptionId) this.orphanedIds.add(this.subscriptionId);
         this.subscriptionId = null;
         if (this.desired) this.enqueueSync();
-      } else {
+      } else if (this.subscriptionId) {
+        // A daemon session that survives the socket drop keeps holding this
+        // subscription; remember it so the next sync can release it.
+        this.orphanedIds.add(this.subscriptionId);
         this.subscriptionId = null;
       }
     });
@@ -96,11 +105,20 @@ export class SieveLensClient {
   }
 
   private async sync(): Promise<void> {
+    await this.releaseOrphaned();
     if (this.desired && !this.subscriptionId) {
       const response = await this.transport.subscribeSieveLensStatus(
         this.lastCursor ? { after: this.lastCursor } : undefined,
       );
-      if (!this.desired) return;
+      if (!this.desired) {
+        // Demand flipped while the subscribe was in flight — release the
+        // membership the daemon just granted rather than stranding it.
+        if (response.accepted && response.subscriptionId) {
+          this.orphanedIds.add(response.subscriptionId);
+          await this.releaseOrphaned();
+        }
+        return;
+      }
       this.lastUpdate = { status: response.status, observedAt: response.observedAt };
       for (const listener of this.listeners) listener(this.lastUpdate);
       if (response.accepted) {
@@ -112,7 +130,25 @@ export class SieveLensClient {
     if (!this.desired && this.subscriptionId) {
       const id = this.subscriptionId;
       this.subscriptionId = null;
-      await this.transport.unsubscribeSieveLensStatus(id);
+      try {
+        await this.transport.unsubscribeSieveLensStatus(id);
+      } catch (error) {
+        this.orphanedIds.add(id);
+        throw error;
+      }
+    }
+  }
+
+  private async releaseOrphaned(): Promise<void> {
+    for (const id of this.orphanedIds) {
+      try {
+        await this.transport.unsubscribeSieveLensStatus(id);
+        this.orphanedIds.delete(id);
+      } catch {
+        // Not connected, or the transport failed — keep the id and retry on
+        // the next sync. The daemon session drops it on cleanup regardless.
+        return;
+      }
     }
   }
 
@@ -132,9 +168,23 @@ export class SieveLensClient {
   }
 
   dispose(): void {
+    const id = this.subscriptionId;
+    this.desired = false;
+    this.subscriptionId = null;
     this.unsubscribeTransport();
     this.unsubscribeEvents();
     this.listeners.clear();
-    this.subscriptionId = null;
+    // Best-effort release — the daemon drops membership on session cleanup,
+    // but a shared connection keeps it alive otherwise.
+    const release = (orphanId: string): void => {
+      try {
+        void this.transport.unsubscribeSieveLensStatus(orphanId).catch(() => {});
+      } catch {
+        // Transport threw synchronously — nothing left to release with.
+      }
+    };
+    if (id) release(id);
+    for (const orphan of this.orphanedIds) release(orphan);
+    this.orphanedIds.clear();
   }
 }
