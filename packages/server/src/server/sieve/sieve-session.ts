@@ -38,6 +38,7 @@ export class SieveSession {
   private readonly logger: pino.Logger;
   private readonly now: () => string;
   private readonly subscriptions = new Map<string, SieveLensFeed>();
+  private disposed = false;
 
   constructor(options: SieveSessionOptions) {
     this.host = options.host;
@@ -116,6 +117,14 @@ export class SieveSession {
       });
       return;
     }
+    if (this.disposed) {
+      // The session was torn down while subscribe was in flight — release the
+      // membership the feed just granted instead of holding it for a dead host.
+      await feed.unsubscribe(subscription.subscriptionId).catch((error: unknown) => {
+        this.logger.warn({ err: error }, "SIEVE feed unsubscribe failed after dispose");
+      });
+      return;
+    }
     this.subscriptions.set(subscription.subscriptionId, feed);
     // Membership exists from here on — the response must report it even when
     // the status read fails, or the daemon would hold a subscription the
@@ -168,6 +177,7 @@ export class SieveSession {
 
   /** Release every feed subscription this session holds. */
   async dispose(): Promise<void> {
+    this.disposed = true;
     const pending = [...this.subscriptions.entries()];
     this.subscriptions.clear();
     await Promise.all(
