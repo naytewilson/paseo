@@ -404,4 +404,56 @@ describe("SieveSession with a feed attached", () => {
 
     expect(feed.unsubscribe).toHaveBeenCalledWith("sub_late");
   });
+
+  test("dispose while status is pending never advertises a released membership", async () => {
+    const { host, messages } = createHost();
+    let resolveStatus: (snapshot: SieveLensFeedSnapshot) => void = () => {};
+    const feed: SieveLensFeed = {
+      getStatus: vi.fn(
+        () =>
+          new Promise<SieveLensFeedSnapshot>((resolve) => {
+            resolveStatus = resolve;
+          }),
+      ),
+      subscribe: vi.fn(async () => ({
+        subscriptionId: "sub_registered",
+        cursor: { epoch: "e", seq: 1 },
+      })),
+      unsubscribe: vi.fn(async () => {}),
+    };
+    const session = new SieveSession({ host, feed, logger });
+
+    const inFlight = session.handleStatusSubscribeRequest({
+      type: "sieve.status.subscribe.request",
+      requestId: "req_sub",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await session.dispose();
+
+    expect(feed.unsubscribe).toHaveBeenCalledWith("sub_registered");
+
+    resolveStatus({
+      status: OK_STATUS,
+      cursor: { epoch: "e", seq: 1 },
+      observedAt: "2026-09-18T00:00:00.000Z",
+    });
+    await inFlight;
+
+    expect(messages).toEqual([]);
+  });
+
+  test("subscribe after dispose never asks the feed for membership", async () => {
+    const { host, messages } = createHost();
+    const { feed } = createFeed();
+    const session = new SieveSession({ host, feed, logger });
+
+    await session.dispose();
+    await session.handleStatusSubscribeRequest({
+      type: "sieve.status.subscribe.request",
+      requestId: "req_after_dispose",
+    });
+
+    expect(feed.subscribe).not.toHaveBeenCalled();
+    expect(messages).toEqual([]);
+  });
 });
