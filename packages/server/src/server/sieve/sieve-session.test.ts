@@ -373,4 +373,35 @@ describe("SieveSession with a feed attached", () => {
 
     expect(feed.unsubscribe).toHaveBeenCalledTimes(2);
   });
+
+  test("a subscribe granted after dispose is released, not held", async () => {
+    const { host } = createHost();
+    let resolveSubscribe: (subscription: {
+      subscriptionId: string;
+      cursor: { epoch: string; seq: number };
+    }) => void = () => {};
+    const feed: SieveLensFeed = {
+      getStatus: vi.fn(),
+      subscribe: vi.fn(
+        () =>
+          new Promise<{ subscriptionId: string; cursor: { epoch: string; seq: number } }>(
+            (resolve) => {
+              resolveSubscribe = resolve;
+            },
+          ),
+      ),
+      unsubscribe: vi.fn(async () => {}),
+    };
+    const session = new SieveSession({ host, feed, logger });
+
+    const inFlight = session.handleStatusSubscribeRequest({
+      type: "sieve.status.subscribe.request",
+      requestId: "req_sub",
+    });
+    await session.dispose();
+    resolveSubscribe({ subscriptionId: "sub_late", cursor: { epoch: "e", seq: 1 } });
+    await inFlight;
+
+    expect(feed.unsubscribe).toHaveBeenCalledWith("sub_late");
+  });
 });
