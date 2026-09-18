@@ -293,6 +293,14 @@ export const PersistedConfigSchema = z
           })
           .strict()
           .optional(),
+        sieve: z
+          .object({
+            // The local SIEVE read surface the Lens feed polls (e.g.
+            // "http://127.0.0.1:8899"). Absent means no feed is attached.
+            baseUrl: z.url().optional(),
+          })
+          .strict()
+          .optional(),
         auth: DaemonAuthSchema.optional(),
       })
       .strict()
