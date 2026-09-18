@@ -59,6 +59,9 @@ export class SieveSession {
   }
 
   async handleStatusSubscribeRequest(msg: SieveStatusSubscribeRequest): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     const feed = this.feed;
     if (!feed) {
       this.host.emit({
@@ -139,6 +142,12 @@ export class SieveSession {
         reason: "feed_unreachable",
         detail: error instanceof Error ? error.message : String(error),
       };
+    }
+    // dispose() may have won while getStatus() was pending. In that case it
+    // already drained/unsubscribed the registered membership, so never publish
+    // an accepted subscription that no longer exists.
+    if (this.disposed) {
+      return;
     }
     this.host.emit({
       type: "sieve.status.subscribe.response",
