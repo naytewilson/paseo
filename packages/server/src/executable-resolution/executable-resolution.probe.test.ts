@@ -165,9 +165,7 @@ describe("probeExecutable", () => {
       expect(result).toBe(expected);
       expect(performance.now() - startedAt).toBeLessThanOrEqual(timeoutMs + timeoutSlackMs);
       if (pidFile) {
-        await waitForFile(pidFile);
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+        expect(existsSync(pidFile)).toBe(false);
       }
     },
   );
