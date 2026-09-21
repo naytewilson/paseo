@@ -65,10 +65,7 @@ describe.skipIf(isPlatform("win32"))("provider-availability POSIX-only", () => {
     isolatePathTo(binDir);
     const markerPath = join(binDir, "opencode-was-executed");
     const executablePath = writeProviderShim(binDir, "opencode");
-    writeFileSync(
-      executablePath,
-      `#!/bin/sh\ntouch "${markerPath}"\necho opencode 1.0\n`,
-    );
+    writeFileSync(executablePath, `#!/bin/sh\ntouch "${markerPath}"\necho opencode 1.0\n`);
     chmodSync(executablePath, 0o755);
     const client = new OpenCodeAgentClient(createTestLogger());
 
