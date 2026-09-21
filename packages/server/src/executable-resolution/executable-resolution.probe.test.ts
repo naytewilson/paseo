@@ -3,7 +3,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -93,13 +92,6 @@ function missingAbsolutePath(): string {
   return process.platform === "win32" ? "C:\\no\\such\\path.exe" : "/no/such/path";
 }
 
-async function waitForFile(filePath: string): Promise<void> {
-  const deadline = performance.now() + timeoutSlackMs;
-  while (!existsSync(filePath) && performance.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
-
 const fixtures: ProbeFixture[] = [
   {
     name: "hangs forever after starting",
@@ -155,9 +147,9 @@ describe("probeExecutable", () => {
       expect(result).toBe(expected);
       expect(performance.now() - startedAt).toBeLessThanOrEqual(timeoutMs + timeoutSlackMs);
       if (pidFile) {
-        await waitForFile(pidFile);
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+        // POSIX availability is proved from file metadata; probing must not
+        // execute provider code merely to decide whether it is installed.
+        expect(existsSync(pidFile)).toBe(false);
       }
     },
   );
@@ -173,9 +165,7 @@ describe("probeExecutable", () => {
       expect(result).toBe(expected);
       expect(performance.now() - startedAt).toBeLessThanOrEqual(timeoutMs + timeoutSlackMs);
       if (pidFile) {
-        await waitForFile(pidFile);
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+        expect(existsSync(pidFile)).toBe(false);
       }
     },
   );
