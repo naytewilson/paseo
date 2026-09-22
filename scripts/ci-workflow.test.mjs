@@ -15,10 +15,8 @@ const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
   ["lint", { name: "lint", contract: "quality" }],
   ["typecheck", { name: "typecheck", contract: "quality" }],
-  ["server-tests-ubuntu", { name: "server-tests (ubuntu-latest)", contracts: ["server", "hub"] }],
-  ["server-tests-windows", { name: "server-tests (windows-latest)", contracts: ["server", "hub"] }],
-  ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
-  ["desktop-tests-windows", { name: "desktop-tests (windows-latest)", contract: "desktop" }],
+  ["server-tests-ubuntu", { name: "server-tests (linux)", contracts: ["server", "hub"] }],
+  ["desktop-tests-ubuntu", { name: "desktop-tests (linux)", contract: "desktop" }],
   ["app-tests", { name: "app-tests", contract: "app" }],
   ["sdk-tests", { name: "sdk-tests", contract: "sdk" }],
   ["playwright-1", { name: "playwright (shard 1/4)", contract: "browser" }],
@@ -87,6 +85,9 @@ test("gated checks are statically named jobs with real job-level gating", () => 
   assert.match(trigger, /^\s+workflow_dispatch:\s*$/m);
   assert.doesNotMatch(workflowSource, /strategy:\s*\n\s+matrix:/);
   assert.doesNotMatch(workflowSource, /RUN_TESTS|Skip unaffected|No .* changes detected/);
+  assert.doesNotMatch(workflowSource, /runs-on:\s*\[[^\]]*Windows/i);
+  assert.doesNotMatch(workflowSource, /nayte-windows/);
+  assert.match(workflowSource, /PLAYWRIGHT_HOST_PLATFORM_OVERRIDE:\s*"ubuntu24\.04-x64"/);
 
   for (const [jobId, expected] of gatedCiJobs) {
     const job = jobs.get(jobId)?.join("\n");
