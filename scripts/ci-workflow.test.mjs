@@ -297,4 +297,11 @@ test("non-required Docker and Nix workflows use trusted events without dynamic p
   assert.match(nixTrigger, /^\s+workflow_dispatch:\s*$/m);
   assert.doesNotMatch(dockerSource, /dorny\/paths-filter/);
   assert.doesNotMatch(nixSource, /dorny\/paths-filter/);
+
+  // Local container-image CI is Podman-native. Do not reintroduce Docker
+  // Actions or a Docker-compatible control plane on the persistent runner.
+  assert.doesNotMatch(dockerSource, /uses:\s+docker\//);
+  assert.doesNotMatch(dockerSource, /^\s*run:\s+docker\s/m);
+  assert.match(dockerSource, /podman build/);
+  assert.match(dockerSource, /podman manifest push/);
 });
