@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   update-hash:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/create-github-app-token@v1
         id: app-token
