@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,7 +107,7 @@ jobs:
         run: nix build .#desktop -o result-desktop
 
   build-desktop-darwin:
-    runs-on: macos-14
+    runs-on: [self-hosted, macOS, ARM64, nayte-macos]
     steps:
       - uses: actions/checkout@v4
         with:
