@@ -293,10 +293,10 @@ unexpired, unrevoked. A missing grant returns `capability_denied`. An unknown
 The read seam is operator-configured per Hub instance. Both variables must be
 set together or the routes answer `503` `room_projection_unavailable`:
 
-| Variable | Shape |
-| -------- | ----- |
-| `PASEO_HUB_ANVIL_DATABASE_URL` | Postgres URL for the ANVIL database; use a dedicated read-only role. |
-| `PASEO_HUB_ANVIL_SUBJECT` | `agent:<uuid>`, `machine:<id>`, or `operator:<user>` — the subject `room.read` grants are checked against. |
+| Variable                       | Shape                                                                                                      |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `PASEO_HUB_ANVIL_DATABASE_URL` | Postgres URL for the ANVIL database; use a dedicated read-only role.                                       |
+| `PASEO_HUB_ANVIL_SUBJECT`      | `agent:<uuid>`, `machine:<id>`, or `operator:<user>` — the subject `room.read` grants are checked against. |
 
 The `room.read` grant itself is issued in ANVIL's authority plane
 (`anvil.capability_grants`), not through Hub.
