@@ -10,15 +10,14 @@ const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
 const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
 const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
+const desktopSmokePath = new URL("packages/desktop/e2e/packaged-app-smoke.js", repoRoot);
 
 const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
   ["lint", { name: "lint", contract: "quality" }],
   ["typecheck", { name: "typecheck", contract: "quality" }],
-  ["server-tests-ubuntu", { name: "server-tests (ubuntu-latest)", contracts: ["server", "hub"] }],
-  ["server-tests-windows", { name: "server-tests (windows-latest)", contracts: ["server", "hub"] }],
-  ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
-  ["desktop-tests-windows", { name: "desktop-tests (windows-latest)", contract: "desktop" }],
+  ["server-tests-ubuntu", { name: "server-tests (linux)", contracts: ["server", "hub"] }],
+  ["desktop-tests-ubuntu", { name: "desktop-tests (linux)", contract: "desktop" }],
   ["app-tests", { name: "app-tests", contract: "app" }],
   ["sdk-tests", { name: "sdk-tests", contract: "sdk" }],
   ["playwright-1", { name: "playwright (shard 1/4)", contract: "browser" }],
@@ -83,9 +82,13 @@ test("gated checks are statically named jobs with real job-level gating", () => 
   const jobs = jobBlocks(workflowSource);
   const trigger = workflowSource.split("jobs:", 1)[0];
 
-  assert.match(trigger, /^\s+merge_group:\s*$/m);
+  assert.doesNotMatch(trigger, /^\s+(?:pull_request|pull_request_target|merge_group):\s*$/m);
+  assert.match(trigger, /^\s+workflow_dispatch:\s*$/m);
   assert.doesNotMatch(workflowSource, /strategy:\s*\n\s+matrix:/);
   assert.doesNotMatch(workflowSource, /RUN_TESTS|Skip unaffected|No .* changes detected/);
+  assert.doesNotMatch(workflowSource, /runs-on:\s*\[[^\]]*Windows/i);
+  assert.doesNotMatch(workflowSource, /nayte-windows/);
+  assert.match(workflowSource, /PLAYWRIGHT_HOST_PLATFORM_OVERRIDE:\s*"ubuntu24\.04-x64"/);
 
   for (const [jobId, expected] of gatedCiJobs) {
     const job = jobs.get(jobId)?.join("\n");
@@ -125,8 +128,38 @@ test("focused contracts stay inside existing required checks", () => {
   assert.match(desktop, /test:e2e:renderer/);
   assert.match(desktop, /test:e2e:browser-tabs/);
   assert.match(desktop, /npm run test --workspace=@getpaseo\/desktop/);
+  assert.match(desktop, /node node_modules\/electron\/install\.js/);
+  assert.match(
+    desktop,
+    /PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX:\s*["']1["']/,
+    "unpacked Linux smoke must opt into the narrow no-sandbox fallback instead of runner sudo",
+  );
+  assert.ok(
+    desktop.indexOf("node node_modules/electron/install.js") <
+      desktop.indexOf("npm run test --workspace=@getpaseo/desktop"),
+    "Electron binary must be installed before Vitest workers can require it concurrently",
+  );
   assert.ok(!jobs.has("desktop-browser-bridge"));
   assert.ok(!jobs.has("playwright-desktop"));
+});
+
+test("Linux packaged smoke passes the explicit sandbox fallback to Electron itself", () => {
+  const source = readFileSync(desktopSmokePath, "utf8");
+
+  assert.match(
+    source,
+    /function linuxSmokeSandboxArgs\(\) \{[\s\S]*PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1"[\s\S]*\["--no-sandbox"\]/,
+  );
+  assert.match(
+    source,
+    /args: \["-a", "--server-args=-screen 0 1280x800x24", executablePath, \.\.\.linuxSmokeSandboxArgs\(\)\]/,
+    "the early Chromium process must receive --no-sandbox directly when the narrow CI opt-in is active",
+  );
+  assert.match(
+    source,
+    /PASEO_ELECTRON_FLAGS:[\s\S]*\.\.\.linuxSmokeSandboxArgs\(\)/,
+    "renderer/runtime flags and the direct executable launch must share one sandbox fallback policy",
+  );
 });
 
 test("server builds exclude test utilities at every domain depth", () => {
@@ -281,11 +314,26 @@ test("browser and desktop tests have exclusive, directory-owned suites", () => {
   ]);
 });
 
-test("non-required Docker and Nix workflows avoid runners with workflow path filters", () => {
-  for (const workflowPath of [dockerWorkflowPath, nixWorkflowPath]) {
-    const source = readFileSync(workflowPath, "utf8");
-    const trigger = source.split("jobs:", 1)[0];
-    assert.match(trigger, /^\s+paths:\s*$/m);
-    assert.doesNotMatch(source, /dorny\/paths-filter/);
+test("non-required Docker and Nix workflows use trusted events without dynamic path-filter jobs", () => {
+  const dockerSource = readFileSync(dockerWorkflowPath, "utf8");
+  const nixSource = readFileSync(nixWorkflowPath, "utf8");
+  const dockerTrigger = dockerSource.split("jobs:", 1)[0];
+  const nixTrigger = nixSource.split("jobs:", 1)[0];
+
+  for (const trigger of [dockerTrigger, nixTrigger]) {
+    assert.doesNotMatch(trigger, /^\s+(?:pull_request|pull_request_target|merge_group):\s*$/m);
   }
+  assert.match(dockerTrigger, /^\s+push:\s*$/m);
+  assert.match(dockerTrigger, /^\s+workflow_dispatch:\s*$/m);
+  assert.match(nixTrigger, /^\s+paths:\s*$/m);
+  assert.match(nixTrigger, /^\s+workflow_dispatch:\s*$/m);
+  assert.doesNotMatch(dockerSource, /dorny\/paths-filter/);
+  assert.doesNotMatch(nixSource, /dorny\/paths-filter/);
+
+  // Local container-image CI is Podman-native. Do not reintroduce Docker
+  // Actions or a Docker-compatible control plane on the persistent runner.
+  assert.doesNotMatch(dockerSource, /uses:\s+docker\//);
+  assert.doesNotMatch(dockerSource, /^\s*run:\s+docker\s/m);
+  assert.match(dockerSource, /podman build/);
+  assert.match(dockerSource, /podman manifest push/);
 });

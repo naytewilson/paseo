@@ -1,27 +1,6 @@
 name: Docker
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "docker/**"
-      - ".dockerignore"
-      - ".github/workflows/docker.yml"
-      - "package.json"
-      - "package-lock.json"
-      - "patches/**"
-      - "scripts/**"
-      - "tsconfig.json"
-      - "tsconfig.base.json"
-      - "packages/app/**"
-      - "packages/cli/**"
-      - "packages/client/**"
-      - "packages/expo-two-way-audio/**"
-      - "packages/highlight/**"
-      - "packages/plugin/**"
-      - "packages/protocol/**"
-      - "packages/relay/**"
-      - "packages/server/**"
   push:
     branches: [main]
     tags:
@@ -59,7 +38,7 @@ env:
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     outputs:
       image: ${{ steps.values.outputs.image }}
       install_version: ${{ steps.values.outputs.install_version }}
@@ -98,7 +77,7 @@ jobs:
           elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${INPUT_PUBLISH:-false}" == "true" ]]; then
               if [[ -z "${INPUT_PASEO_VERSION}" || "${INPUT_PASEO_VERSION}" == "latest" ]]; then
-                echo "::error::paseo_version is required for manual Docker publishes."
+                echo "::error::paseo_version is required for manual OCI image publishes."
                 exit 1
               fi
               publish=true
@@ -134,57 +113,81 @@ jobs:
   build:
     needs: setup
     if: needs.setup.outputs.publish != 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
 
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
+      - name: Build multi-arch OCI image with Podman
+        env:
+          CHECK_TAG: ${{ needs.setup.outputs.check_tag }}
+          PASEO_VERSION: ${{ needs.setup.outputs.install_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          podman build \
+            --platform "${PLATFORMS}" \
+            --manifest "${CHECK_TAG}" \
+            --build-arg "PASEO_VERSION=${PASEO_VERSION}" \
+            --file docker/base/Dockerfile \
+            .
 
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/base/Dockerfile
-          platforms: ${{ env.PLATFORMS }}
-          build-args: |
-            PASEO_VERSION=${{ needs.setup.outputs.install_version }}
-          tags: ${{ needs.setup.outputs.check_tag }}
-          push: false
-          provenance: false
-          cache-from: type=gha,scope=paseo
-          cache-to: type=gha,scope=paseo,mode=max
+      - name: Remove local check manifest
+        if: always()
+        env:
+          CHECK_TAG: ${{ needs.setup.outputs.check_tag }}
+        run: podman manifest rm "${CHECK_TAG}" >/dev/null 2>&1 || true
 
   publish:
     needs: setup
     if: needs.setup.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v6
 
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR with Podman
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | podman login "${REGISTRY}" --username "${{ github.actor }}" --password-stdin
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish multi-arch OCI image with Podman
+        env:
+          PUBLISH_TAGS: ${{ needs.setup.outputs.publish_tags }}
+          PASEO_VERSION: ${{ needs.setup.outputs.install_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t tags <<< "${PUBLISH_TAGS}"
+          primary="${tags[0]:-}"
+          test -n "${primary}"
 
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/base/Dockerfile
-          platforms: ${{ env.PLATFORMS }}
-          build-args: |
-            PASEO_VERSION=${{ needs.setup.outputs.install_version }}
-          tags: ${{ needs.setup.outputs.publish_tags }}
-          push: true
-          provenance: false
-          cache-from: type=gha,scope=paseo
-          cache-to: type=gha,scope=paseo,mode=max
+          podman build \
+            --platform "${PLATFORMS}" \
+            --manifest "${primary}" \
+            --build-arg "PASEO_VERSION=${PASEO_VERSION}" \
+            --file docker/base/Dockerfile \
+            .
+
+          for tag in "${tags[@]}"; do
+            test -n "${tag}" || continue
+            podman manifest push --all "${primary}" "docker://${tag}"
+          done
+
+      - name: Remove local publish manifest
+        if: always()
+        env:
+          PUBLISH_TAGS: ${{ needs.setup.outputs.publish_tags }}
+        shell: bash
+        run: |
+          mapfile -t tags <<< "${PUBLISH_TAGS}"
+          primary="${tags[0]:-}"
+          if [[ -n "${primary}" ]]; then
+            podman manifest rm "${primary}" >/dev/null 2>&1 || true
+          fi

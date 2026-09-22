@@ -67,6 +67,20 @@ function getMacMainExecutablePath(appPath) {
   return path.join(appPath, "Contents", "MacOS", EXECUTABLE_NAME);
 }
 
+function configureLinuxSandboxPermissions(sandboxPath) {
+  const chown = spawnSync("sudo", ["-n", "chown", "root:root", sandboxPath], {
+    encoding: "utf8",
+  });
+  const chmod =
+    chown.status === 0
+      ? spawnSync("sudo", ["-n", "chmod", "4755", sandboxPath], { encoding: "utf8" })
+      : null;
+  if (chown.error || chown.status !== 0 || chmod?.error || chmod?.status !== 0) {
+    throw new Error(
+      `Failed to configure Chromium sandbox helper ${sandboxPath}. Run: sudo chown root:root ${sandboxPath} && sudo chmod 4755 ${sandboxPath}.\n${chown.stderr?.trim() || chmod?.stderr?.trim() || chown.error || chmod?.error || "Permissions remained incorrect."}`,
+    );
+  }
+}
 function ensureLinuxSandboxPermissions(appPath) {
   if (process.platform !== "linux") {
     return;
@@ -85,23 +99,29 @@ function ensureLinuxSandboxPermissions(appPath) {
     return;
   }
 
-  const chown = spawnSync("sudo", ["-n", "chown", "root:root", sandboxPath], {
-    encoding: "utf8",
-  });
-  const chmod =
-    chown.status === 0
-      ? spawnSync("sudo", ["-n", "chmod", "4755", sandboxPath], { encoding: "utf8" })
-      : null;
-  if (chown.error || chown.status !== 0 || chmod?.error || chmod?.status !== 0) {
-    throw new Error(
-      `Failed to configure Chromium sandbox helper ${sandboxPath}. Run: sudo chown root:root ${sandboxPath} && sudo chmod 4755 ${sandboxPath}.\n${chown.stderr?.trim() || chmod?.stderr?.trim() || chown.error || chmod?.error || "Permissions remained incorrect."}`,
+  // Unpacked CI artifacts are never installed by a package manager, so their
+  // chrome-sandbox helper cannot legitimately be root-owned setuid. Keep the
+  // self-hosted runner unprivileged: when the workflow explicitly opts into
+  // the smoke-only fallback, launch Electron with --no-sandbox instead of
+  // widening runner sudo authority.
+  if (process.env.PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1") {
+    console.warn(
+      `Packaged desktop smoke: chrome-sandbox is not setuid; using explicit CI-only --no-sandbox fallback (${sandboxPath})`,
     );
+    return;
   }
+
+  configureLinuxSandboxPermissions(sandboxPath);
   if (!hasRequiredPermissions()) {
     throw new Error(`Chromium sandbox helper permissions remained incorrect: ${sandboxPath}`);
   }
 }
 
+function linuxSmokeSandboxArgs() {
+  return process.platform === "linux" && process.env.PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1"
+    ? ["--no-sandbox"]
+    : [];
+}
 function getLaunchCommand(executablePath) {
   if (process.platform !== "linux") {
     return {
@@ -112,7 +132,7 @@ function getLaunchCommand(executablePath) {
 
   return {
     command: "xvfb-run",
-    args: ["-a", "--server-args=-screen 0 1280x800x24", executablePath],
+    args: ["-a", "--server-args=-screen 0 1280x800x24", executablePath, ...linuxSmokeSandboxArgs()],
   };
 }
 
@@ -173,7 +193,11 @@ function createIsolatedDesktopEnv({ home, listen, userData, cdpPort }) {
     PASEO_HOME: home,
     PASEO_LISTEN: listen,
     PASEO_ELECTRON_USER_DATA_DIR: userData,
-    PASEO_ELECTRON_FLAGS: `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${cdpPort}`,
+    PASEO_ELECTRON_FLAGS: [
+      `--remote-debugging-address=127.0.0.1`,
+      `--remote-debugging-port=${cdpPort}`,
+      ...linuxSmokeSandboxArgs(),
+    ].join(" "),
   };
 }
 
