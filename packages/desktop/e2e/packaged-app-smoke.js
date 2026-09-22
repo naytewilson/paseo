@@ -67,6 +67,20 @@ function getMacMainExecutablePath(appPath) {
   return path.join(appPath, "Contents", "MacOS", EXECUTABLE_NAME);
 }
 
+function configureLinuxSandboxPermissions(sandboxPath) {
+  const chown = spawnSync("sudo", ["-n", "chown", "root:root", sandboxPath], {
+    encoding: "utf8",
+  });
+  const chmod =
+    chown.status === 0
+      ? spawnSync("sudo", ["-n", "chmod", "4755", sandboxPath], { encoding: "utf8" })
+      : null;
+  if (chown.error || chown.status !== 0 || chmod?.error || chmod?.status !== 0) {
+    throw new Error(
+      `Failed to configure Chromium sandbox helper ${sandboxPath}. Run: sudo chown root:root ${sandboxPath} && sudo chmod 4755 ${sandboxPath}.\n${chown.stderr?.trim() || chmod?.stderr?.trim() || chown.error || chmod?.error || "Permissions remained incorrect."}`,
+    );
+  }
+}
 function ensureLinuxSandboxPermissions(appPath) {
   if (process.platform !== "linux") {
     return;
@@ -97,18 +111,7 @@ function ensureLinuxSandboxPermissions(appPath) {
     return;
   }
 
-  const chown = spawnSync("sudo", ["-n", "chown", "root:root", sandboxPath], {
-    encoding: "utf8",
-  });
-  const chmod =
-    chown.status === 0
-      ? spawnSync("sudo", ["-n", "chmod", "4755", sandboxPath], { encoding: "utf8" })
-      : null;
-  if (chown.error || chown.status !== 0 || chmod?.error || chmod?.status !== 0) {
-    throw new Error(
-      `Failed to configure Chromium sandbox helper ${sandboxPath}. Run: sudo chown root:root ${sandboxPath} && sudo chmod 4755 ${sandboxPath}.\n${chown.stderr?.trim() || chmod?.stderr?.trim() || chown.error || chmod?.error || "Permissions remained incorrect."}`,
-    );
-  }
+  configureLinuxSandboxPermissions(sandboxPath);
   if (!hasRequiredPermissions()) {
     throw new Error(`Chromium sandbox helper permissions remained incorrect: ${sandboxPath}`);
   }
@@ -188,8 +191,7 @@ function createIsolatedDesktopEnv({ home, listen, userData, cdpPort }) {
     PASEO_ELECTRON_FLAGS: [
       `--remote-debugging-address=127.0.0.1`,
       `--remote-debugging-port=${cdpPort}`,
-      ...(process.platform === "linux" &&
-      process.env.PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1"
+      ...(process.platform === "linux" && process.env.PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1"
         ? ["--no-sandbox"]
         : []),
     ].join(" "),
