@@ -85,6 +85,18 @@ function ensureLinuxSandboxPermissions(appPath) {
     return;
   }
 
+  // Unpacked CI artifacts are never installed by a package manager, so their
+  // chrome-sandbox helper cannot legitimately be root-owned setuid. Keep the
+  // self-hosted runner unprivileged: when the workflow explicitly opts into
+  // the smoke-only fallback, launch Electron with --no-sandbox instead of
+  // widening runner sudo authority.
+  if (process.env.PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1") {
+    console.warn(
+      `Packaged desktop smoke: chrome-sandbox is not setuid; using explicit CI-only --no-sandbox fallback (${sandboxPath})`,
+    );
+    return;
+  }
+
   const chown = spawnSync("sudo", ["-n", "chown", "root:root", sandboxPath], {
     encoding: "utf8",
   });
@@ -173,7 +185,14 @@ function createIsolatedDesktopEnv({ home, listen, userData, cdpPort }) {
     PASEO_HOME: home,
     PASEO_LISTEN: listen,
     PASEO_ELECTRON_USER_DATA_DIR: userData,
-    PASEO_ELECTRON_FLAGS: `--remote-debugging-address=127.0.0.1 --remote-debugging-port=${cdpPort}`,
+    PASEO_ELECTRON_FLAGS: [
+      `--remote-debugging-address=127.0.0.1`,
+      `--remote-debugging-port=${cdpPort}`,
+      ...(process.platform === "linux" &&
+      process.env.PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1"
+        ? ["--no-sandbox"]
+        : []),
+    ].join(" "),
   };
 }
 
