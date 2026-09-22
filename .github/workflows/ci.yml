@@ -187,6 +187,11 @@ jobs:
       - name: Install dependencies with retry
         run: node scripts/npm-retry.mjs ci
 
+      # Electron 44 downloads lazily on first require; preinstall once so Vitest
+      # workers cannot race extraction into the shared node_modules tree.
+      - name: Install Electron binary before parallel tests
+        run: node node_modules/electron/install.js
+
       - name: Build server stack
         run: npm run build:server
 

@@ -127,6 +127,12 @@ test("focused contracts stay inside existing required checks", () => {
   assert.match(desktop, /test:e2e:renderer/);
   assert.match(desktop, /test:e2e:browser-tabs/);
   assert.match(desktop, /npm run test --workspace=@getpaseo\/desktop/);
+  assert.match(desktop, /node node_modules\/electron\/install\.js/);
+  assert.ok(
+    desktop.indexOf("node node_modules/electron/install.js") <
+      desktop.indexOf("npm run test --workspace=@getpaseo/desktop"),
+    "Electron binary must be installed before Vitest workers can require it concurrently",
+  );
   assert.ok(!jobs.has("desktop-browser-bridge"));
   assert.ok(!jobs.has("playwright-desktop"));
 });
