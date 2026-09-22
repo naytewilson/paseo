@@ -2,6 +2,8 @@ name: Debug Podman Probe (temporary)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [tmp/debug-podman-probe]
 
 jobs:
   probe:
