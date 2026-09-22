@@ -83,7 +83,8 @@ test("gated checks are statically named jobs with real job-level gating", () => 
   const jobs = jobBlocks(workflowSource);
   const trigger = workflowSource.split("jobs:", 1)[0];
 
-  assert.match(trigger, /^\s+merge_group:\s*$/m);
+  assert.doesNotMatch(trigger, /^\s+(?:pull_request|pull_request_target|merge_group):\s*$/m);
+  assert.match(trigger, /^\s+workflow_dispatch:\s*$/m);
   assert.doesNotMatch(workflowSource, /strategy:\s*\n\s+matrix:/);
   assert.doesNotMatch(workflowSource, /RUN_TESTS|Skip unaffected|No .* changes detected/);
 
@@ -281,11 +282,19 @@ test("browser and desktop tests have exclusive, directory-owned suites", () => {
   ]);
 });
 
-test("non-required Docker and Nix workflows avoid runners with workflow path filters", () => {
-  for (const workflowPath of [dockerWorkflowPath, nixWorkflowPath]) {
-    const source = readFileSync(workflowPath, "utf8");
-    const trigger = source.split("jobs:", 1)[0];
-    assert.match(trigger, /^\s+paths:\s*$/m);
-    assert.doesNotMatch(source, /dorny\/paths-filter/);
+test("non-required Docker and Nix workflows use trusted events without dynamic path-filter jobs", () => {
+  const dockerSource = readFileSync(dockerWorkflowPath, "utf8");
+  const nixSource = readFileSync(nixWorkflowPath, "utf8");
+  const dockerTrigger = dockerSource.split("jobs:", 1)[0];
+  const nixTrigger = nixSource.split("jobs:", 1)[0];
+
+  for (const trigger of [dockerTrigger, nixTrigger]) {
+    assert.doesNotMatch(trigger, /^\s+(?:pull_request|pull_request_target|merge_group):\s*$/m);
   }
+  assert.match(dockerTrigger, /^\s+push:\s*$/m);
+  assert.match(dockerTrigger, /^\s+workflow_dispatch:\s*$/m);
+  assert.match(nixTrigger, /^\s+paths:\s*$/m);
+  assert.match(nixTrigger, /^\s+workflow_dispatch:\s*$/m);
+  assert.doesNotMatch(dockerSource, /dorny\/paths-filter/);
+  assert.doesNotMatch(nixSource, /dorny\/paths-filter/);
 });
