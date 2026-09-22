@@ -128,7 +128,10 @@ class FakeAgent {
       sessionId: params.sessionId,
       update: {
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: `v6-fake-ok model=${record.model} thinking=${record.thinking}` },
+        content: {
+          type: "text",
+          text: `v6-fake-ok model=${record.model} thinking=${record.thinking}`,
+        },
       },
     });
     return { stopReason: "end_turn" };
@@ -139,4 +142,5 @@ class FakeAgent {
 const input = Writable.toWeb(process.stdout);
 const output = Readable.toWeb(process.stdin);
 const stream = acp.ndJsonStream(input, output);
-new acp.AgentSideConnection((conn) => new FakeAgent(conn), stream);
+const connection = new acp.AgentSideConnection((conn) => new FakeAgent(conn), stream);
+await connection.closed;
