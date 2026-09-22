@@ -59,7 +59,7 @@ jobs:
     if: ${{ (github.event_name == 'push' && !startsWith(github.ref_name, 'desktop-macos-v') && !startsWith(github.ref_name, 'desktop-linux-v') && !startsWith(github.ref_name, 'desktop-windows-v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'all' && github.event.inputs.publish != 'false') }}
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,14 +100,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runs_on: '["self-hosted","macOS","ARM64","nayte-macos"]'
             electron_arch: arm64
-          - runner: macos-15-intel
+          - runs_on: '["self-hosted","macOS","X64","nayte-macos-x64"]'
             electron_arch: x64
     permissions:
       contents: write
       packages: read
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -218,7 +218,7 @@ jobs:
     permissions:
       contents: write
       packages: read
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
 
     steps:
       - uses: actions/checkout@v4
@@ -260,8 +260,8 @@ jobs:
           fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
           NODE
 
-      - name: Install Linux smoke display
-        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+      - name: Verify Linux smoke display prerequisites
+        run: command -v Xvfb && command -v xauth
 
       - name: Build desktop release
         shell: bash
@@ -327,7 +327,7 @@ jobs:
     permissions:
       contents: write
       packages: read
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, nayte-windows]
 
     steps:
       - uses: actions/checkout@v4
@@ -432,7 +432,7 @@ jobs:
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish != 'false') }}
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     concurrency:
       group: desktop-rollout-${{ github.event.inputs.tag || github.ref_name }}
       cancel-in-progress: false
