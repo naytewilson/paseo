@@ -1,0 +1,46 @@
+name: Debug Podman Probe (temporary)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment snapshot
+        shell: bash
+        run: |
+          set -x
+          id
+          echo "HOME=$HOME"
+          echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+          echo "container=${container:-<unset>}"
+          echo "_CONTAINERS_USERNS_CONFIGURED=${_CONTAINERS_USERNS_CONFIGURED:-<unset>}"
+          echo "--- uid_map:"; cat /proc/self/uid_map
+          echo "--- gid_map:"; cat /proc/self/gid_map
+          echo "--- ns user:"; readlink /proc/self/ns/user
+          echo "--- subuid:"; grep anvil-ci /etc/subuid || echo MISSING
+          echo "--- podman info (rootless check):"
+          podman info --format '{{.Host.Security.Rootless}}' || echo "podman info FAILED rc=$?"
+
+      - name: Trivial multi-arch podman build
+        shell: bash
+        run: |
+          set -x
+          mkdir -p /tmp/podprobe && printf 'FROM scratch\n' > /tmp/podprobe/Containerfile
+          cd /tmp/podprobe
+          podman build --platform "linux/amd64,linux/arm64" --manifest probe-manifest --file Containerfile . || echo "TRIVIAL BUILD FAILED rc=$?"
+          podman manifest rm probe-manifest >/dev/null 2>&1 || true
+
+      - name: Real docker build (debug log level)
+        shell: bash
+        run: |
+          podman --log-level=debug build \
+            --platform "linux/amd64,linux/arm64" \
+            --manifest "ghcr.io/naytewilson/paseo:probe-debug" \
+            --build-arg "PASEO_VERSION=0.9.1" \
+            --file docker/base/Dockerfile \
+            . 2>&1 | tail -40 || echo "REAL BUILD FAILED rc=$?"
+          podman manifest rm "ghcr.io/naytewilson/paseo:probe-debug" >/dev/null 2>&1 || true
