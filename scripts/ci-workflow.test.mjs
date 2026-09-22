@@ -10,6 +10,7 @@ const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
 const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
 const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
+const desktopSmokePath = new URL("packages/desktop/e2e/packaged-app-smoke.js", repoRoot);
 
 const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
@@ -140,6 +141,25 @@ test("focused contracts stay inside existing required checks", () => {
   );
   assert.ok(!jobs.has("desktop-browser-bridge"));
   assert.ok(!jobs.has("playwright-desktop"));
+});
+
+test("Linux packaged smoke passes the explicit sandbox fallback to Electron itself", () => {
+  const source = readFileSync(desktopSmokePath, "utf8");
+
+  assert.match(
+    source,
+    /function linuxSmokeSandboxArgs\(\) \{[\s\S]*PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1"[\s\S]*\["--no-sandbox"\]/,
+  );
+  assert.match(
+    source,
+    /args: \["-a", "--server-args=-screen 0 1280x800x24", executablePath, \.\.\.linuxSmokeSandboxArgs\(\)\]/,
+    "the early Chromium process must receive --no-sandbox directly when the narrow CI opt-in is active",
+  );
+  assert.match(
+    source,
+    /PASEO_ELECTRON_FLAGS:[\s\S]*\.\.\.linuxSmokeSandboxArgs\(\)/,
+    "renderer/runtime flags and the direct executable launch must share one sandbox fallback policy",
+  );
 });
 
 test("server builds exclude test utilities at every domain depth", () => {

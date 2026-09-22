@@ -117,6 +117,11 @@ function ensureLinuxSandboxPermissions(appPath) {
   }
 }
 
+function linuxSmokeSandboxArgs() {
+  return process.platform === "linux" && process.env.PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1"
+    ? ["--no-sandbox"]
+    : [];
+}
 function getLaunchCommand(executablePath) {
   if (process.platform !== "linux") {
     return {
@@ -127,7 +132,7 @@ function getLaunchCommand(executablePath) {
 
   return {
     command: "xvfb-run",
-    args: ["-a", "--server-args=-screen 0 1280x800x24", executablePath],
+    args: ["-a", "--server-args=-screen 0 1280x800x24", executablePath, ...linuxSmokeSandboxArgs()],
   };
 }
 
@@ -191,9 +196,7 @@ function createIsolatedDesktopEnv({ home, listen, userData, cdpPort }) {
     PASEO_ELECTRON_FLAGS: [
       `--remote-debugging-address=127.0.0.1`,
       `--remote-debugging-port=${cdpPort}`,
-      ...(process.platform === "linux" && process.env.PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX === "1"
-        ? ["--no-sandbox"]
-        : []),
+      ...linuxSmokeSandboxArgs(),
     ].join(" "),
   };
 }
