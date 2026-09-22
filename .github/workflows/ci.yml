@@ -167,7 +167,7 @@ jobs:
   server-tests-windows:
     name: server-tests (windows-latest)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ vars.PASEO_WINDOWS_CI_ENABLED == 'true' && !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
     runs-on: [self-hosted, Windows, X64, nayte-windows]
     steps: *server_test_steps
 
@@ -243,7 +243,7 @@ jobs:
   desktop-tests-windows:
     name: desktop-tests (windows-latest)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
+    if: ${{ vars.PASEO_WINDOWS_CI_ENABLED == 'true' && !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: [self-hosted, Windows, X64, nayte-windows]
     timeout-minutes: 30
     permissions:
