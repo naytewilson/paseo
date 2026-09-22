@@ -2,10 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  merge_group:
+    branches: [main, north/local-ci-cutover-20260921]
   workflow_dispatch:
 
 concurrency:
@@ -199,9 +196,9 @@ jobs:
       - name: Run desktop tests
         run: npm run test --workspace=@getpaseo/desktop
 
-      - name: Install virtual display
+      - name: Verify virtual display prerequisites
         if: ${{ runner.os == 'Linux' }}
-        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+        run: command -v Xvfb && command -v xauth
 
       - name: Install Playwright browser
         if: ${{ runner.os == 'Linux' }}
