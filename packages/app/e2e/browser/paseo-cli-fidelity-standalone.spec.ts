@@ -3,7 +3,9 @@ import { expectComposerVisible } from "../support/helpers/composer";
 import { openAgentRoute, seedMockAgentWorkspace } from "../support/helpers/mock-agent";
 
 test.describe("PASEO Browser CLI Fidelity Presentation V5", () => {
-  test("renders real browser tool card with Read and file path summary", async ({ page }, testInfo) => {
+  test("renders real browser tool card with Read and file path summary", async ({
+    page,
+  }, testInfo) => {
     test.setTimeout(120_000);
     await page.setViewportSize({ width: 1280, height: 800 });
 
@@ -40,7 +42,9 @@ test.describe("PASEO Browser CLI Fidelity Presentation V5", () => {
       await expect(readBadge).not.toHaveText(/read_file/);
 
       // Verify single card per lifecycle (not duplicated)
-      const allReadBadges = group.getByTestId("tool-call-badge").filter({ hasText: "packages/app/src/components/conversation-list.tsx" });
+      const allReadBadges = group
+        .getByTestId("tool-call-badge")
+        .filter({ hasText: "packages/app/src/components/conversation-list.tsx" });
       await expect(allReadBadges).toHaveCount(1);
 
       // Capture screenshot artifact
