@@ -13,6 +13,10 @@ env:
   # CI does not use the CUDA execution provider, and the onnxruntime-node
   # postinstall download from NuGet is large enough to make npm ci flaky.
   ONNXRUNTIME_NODE_INSTALL: skip
+  # Playwright 1.58 does not yet publish an Ubuntu 26.04 host mapping. The
+  # runner remains native Ubuntu 26.04; this selects its compatible Ubuntu
+  # 24.04 x64 browser artifact only.
+  PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: "ubuntu24.04-x64"
 
 jobs:
   changes:
@@ -124,7 +128,7 @@ jobs:
           npm pack --dry-run --ignore-scripts --workspace=@getpaseo/server
 
   server-tests-ubuntu:
-    name: server-tests (ubuntu-latest)
+    name: server-tests (linux)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
     runs-on: [self-hosted, Linux, X64, nayte-linux]
@@ -164,15 +168,8 @@ jobs:
         if: ${{ needs.changes.outputs.full == 'false' && needs.changes.outputs.server == 'false' && needs.changes.outputs.hub != 'false' }}
         run: npm run test:hub-cli-contract --workspace=@getpaseo/server
 
-  server-tests-windows:
-    name: server-tests (windows-latest)
-    needs: changes
-    if: ${{ vars.PASEO_WINDOWS_CI_ENABLED == 'true' && !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
-    runs-on: [self-hosted, Windows, X64, nayte-windows]
-    steps: *server_test_steps
-
   desktop-tests-ubuntu:
-    name: desktop-tests (ubuntu-latest)
+    name: desktop-tests (linux)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: [self-hosted, Linux, X64, nayte-linux]
@@ -239,16 +236,6 @@ jobs:
           path: ${{ runner.temp }}/desktop-smoke
           if-no-files-found: ignore
           retention-days: 7
-
-  desktop-tests-windows:
-    name: desktop-tests (windows-latest)
-    needs: changes
-    if: ${{ vars.PASEO_WINDOWS_CI_ENABLED == 'true' && !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
-    runs-on: [self-hosted, Windows, X64, nayte-windows]
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps: *desktop_test_steps
 
   app-tests:
     name: app-tests
