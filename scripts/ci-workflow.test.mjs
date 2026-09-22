@@ -128,6 +128,11 @@ test("focused contracts stay inside existing required checks", () => {
   assert.match(desktop, /test:e2e:browser-tabs/);
   assert.match(desktop, /npm run test --workspace=@getpaseo\/desktop/);
   assert.match(desktop, /node node_modules\/electron\/install\.js/);
+  assert.match(
+    desktop,
+    /PASEO_DESKTOP_SMOKE_ALLOW_NO_SANDBOX:\s*["']1["']/,
+    "unpacked Linux smoke must opt into the narrow no-sandbox fallback instead of runner sudo",
+  );
   assert.ok(
     desktop.indexOf("node node_modules/electron/install.js") <
       desktop.indexOf("npm run test --workspace=@getpaseo/desktop"),
