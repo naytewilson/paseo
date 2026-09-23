@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CarrierCorrelationSchema } from "./correlation.js";
 import { TerminalActivitySchema } from "./terminal-activity.js";
 import { CLIENT_CAPS } from "./client-capabilities.js";
 import { AGENT_LIFECYCLE_STATUSES } from "./agent-lifecycle.js";
@@ -3041,6 +3042,13 @@ export const HubExecutionAgentCreateRequestSchema = z.object({
   env: z.record(z.string(), z.string()).optional(),
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
   worktree: CreateAgentWorktreeTargetSchema.optional(),
+  /**
+   * Correlation Envelope V1 (wire `anvil.correlation.v2`), carried opaquely
+   * from the owning plane. Paseo never mints or derives these fields — the
+   * Hub-owned `executionId` above is a different namespace and is never
+   * mapped into the envelope's `execution_id`.
+   */
+  correlation: CarrierCorrelationSchema.optional(),
 });
 
 export type HubExecutionAgentCreateRequest = z.infer<typeof HubExecutionAgentCreateRequestSchema>;
@@ -3092,6 +3100,8 @@ export const HubExecutionControlRequestSchema = z.object({
   requestId: z.string(),
   executionId: z.string(),
   action: HubExecutionControlActionSchema,
+  /** Correlation Envelope V1, carried opaquely from the owning plane. */
+  correlation: CarrierCorrelationSchema.optional(),
 });
 
 export type HubExecutionControlRequest = z.infer<typeof HubExecutionControlRequestSchema>;
@@ -6260,6 +6270,12 @@ export const HubExecutionAgentCreateResponseSchema = z.object({
     executionId: z.string(),
     agentId: z.string().nullable(),
     agent: AgentSnapshotPayloadSchema.nullable(),
+    /**
+     * Carried envelope for the owned snapshot; null when none was received.
+     * Optional (not just nullable) so messages written before this field
+     * existed still parse — producers always emit null or a value.
+     */
+    correlation: CarrierCorrelationSchema.nullable().optional(),
     success: z.boolean(),
     toolPolicyApplied: z.literal(true).optional(),
     error: HubExecutionAgentCreateErrorSchema.nullable(),
@@ -6302,6 +6318,12 @@ export const HubExecutionAgentUpdateSchema = z.object({
     executionId: z.string(),
     agentId: z.string(),
     agent: AgentSnapshotPayloadSchema,
+    /**
+     * Carried envelope for the owned snapshot; null when none was received.
+     * Optional (not just nullable) so messages written before this field
+     * existed still parse — producers always emit null or a value.
+     */
+    correlation: CarrierCorrelationSchema.nullable().optional(),
   }),
 });
 
@@ -6311,6 +6333,12 @@ export const HubExecutionAgentStreamSchema = z.object({
     executionId: z.string(),
     agentId: z.string(),
     event: AgentStreamEventPayloadSchema,
+    /**
+     * Carried envelope for the owned stream event; null when none was received.
+     * Optional (not just nullable) so messages written before this field
+     * existed still parse — producers always emit null or a value.
+     */
+    correlation: CarrierCorrelationSchema.nullable().optional(),
   }),
 });
 

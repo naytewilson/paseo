@@ -763,6 +763,7 @@ export class HubRelationshipHarness {
       mcpServers?: AgentSessionConfig["mcpServers"];
       providerOptions?: AgentSessionConfig["providerOptions"];
       toolPolicy?: AgentSessionConfig["toolPolicy"];
+      correlation?: unknown;
     } = {},
   ): void {
     const { prompt = "Create through the Hub", provider = "codex", ...requestOptions } = options;
@@ -1559,6 +1560,7 @@ export class HubRelationshipHarness {
   private executionsForReconstruction(manager: AgentManager, storage: AgentStorage) {
     return new DaemonExecutions({
       daemonId: this.relationshipFile()!.relationship.daemonId,
+      serverId: "test-server-id",
       agentManager: manager,
       agentStorage: storage,
       createAgent: (input) =>

@@ -326,3 +326,122 @@ test("failed create never archives a reused worktree", async () => {
   });
   expect(await hub.worktreeState(worktreeCwd!)).toEqual({ exists: true, listed: true });
 });
+
+test("owned snapshots carry the inbound correlation envelope with Paseo plane ids merged", async () => {
+  const hub = await launchRelationship();
+  const envelope = {
+    schema: "anvil.correlation.v2",
+    correlation_id: "22222222-2222-4222-8222-222222222222",
+    causation_id: null,
+    campaign_id: null,
+    task_ref: null,
+    execution_id: "11111111-1111-4111-8111-111111111111",
+    execution_binding_id: "33333333-3333-4333-8333-333333333333",
+    binding_generation: 4,
+    producer: "hub:control",
+    observed_at: "2026-09-23T21:42:00.123Z",
+    idempotency_key: "k-1",
+    source_ref: "control_operations:op-1",
+    plane_identity: { control_operation_id: "op-1" },
+    future_field: "preserved",
+  };
+  hub.beginOwnedCreate("corr-create", "corr-execution", { correlation: envelope });
+
+  const response = await hub.ownedCreateResult("corr-create");
+  expect(response).toMatchObject({
+    type: "hub.execution.agent.create.response",
+    payload: {
+      success: true,
+      correlation: {
+        schema: "anvil.correlation.v2",
+        correlation_id: "22222222-2222-4222-8222-222222222222",
+        // The Hub-owned executionId is never mapped into execution_id.
+        execution_id: "11111111-1111-4111-8111-111111111111",
+        execution_binding_id: "33333333-3333-4333-8333-333333333333",
+        binding_generation: 4,
+        future_field: "preserved",
+      },
+    },
+  });
+  if (
+    response.type !== "hub.execution.agent.create.response" ||
+    response.payload.correlation === null
+  ) {
+    throw new Error("Expected a Hub create response carrying a correlation envelope");
+  }
+  const carried = response.payload.correlation;
+  // Only the two native Paseo ids are added to plane_identity.
+  expect(carried.plane_identity).toMatchObject({
+    control_operation_id: "op-1",
+    paseo_agent_id: response.payload.agentId,
+  });
+  expect(typeof carried.plane_identity?.paseo_server_id).toBe("string");
+  expect(carried.plane_identity?.paseo_server_id).not.toBe("");
+  // No prompt material enters the envelope.
+  expect(JSON.stringify(carried)).not.toContain("Create through the Hub");
+
+  const update = hub.hubMessages().find((message) => message.type === "hub.execution.agent.update");
+  if (
+    !update ||
+    update.type !== "hub.execution.agent.update" ||
+    update.payload.correlation === null
+  ) {
+    throw new Error("Expected a Hub agent update carrying a correlation envelope");
+  }
+  expect(update.payload.correlation.execution_binding_id).toBe(
+    "33333333-3333-4333-8333-333333333333",
+  );
+  expect(update.payload.correlation.binding_generation).toBe(4);
+  expect(update.payload.correlation.plane_identity?.paseo_agent_id).toBe(update.payload.agentId);
+});
+
+test("absent stays absent: snapshots without an inbound envelope carry null", async () => {
+  const hub = await launchRelationship();
+  hub.beginOwnedCreate("bare-create", "bare-execution");
+
+  const response = await hub.ownedCreateResult("bare-create");
+  expect(response).toMatchObject({
+    type: "hub.execution.agent.create.response",
+    payload: { success: true, correlation: null },
+  });
+});
+
+test("unknown-schema envelopes survive daemon reconstruction via the persisted owner", async () => {
+  const hub = await launchRelationship();
+  // A future schema may type fields differently — carried verbatim, never
+  // shape-checked, and durable across restart through the persisted owner.
+  const envelope = {
+    schema: "anvil.correlation.v9",
+    binding_generation: "four",
+    brand_new_field: { nested: [1, 2, 3] },
+  };
+  hub.beginOwnedCreate("v9-create", "v9-execution", { correlation: envelope });
+
+  const response = await hub.ownedCreateResult("v9-create");
+  expect(response).toMatchObject({
+    type: "hub.execution.agent.create.response",
+    payload: {
+      success: true,
+      correlation: {
+        schema: "anvil.correlation.v9",
+        binding_generation: "four",
+        brand_new_field: { nested: [1, 2, 3] },
+      },
+    },
+  });
+
+  // Reconstruct against the same storage (simulated restart) and replay the
+  // create with no inbound envelope: the persisted owner must rehydrate the
+  // opaque carry rather than dropping or minting it.
+  const reconstructed = await hub.reconstructAndReplay("v9-execution");
+  const carried = reconstructed.replay.correlation;
+  if (carried === null) {
+    throw new Error("Expected the reconstructed execution to carry the v9 envelope");
+  }
+  expect(carried.schema).toBe("anvil.correlation.v9");
+  expect((carried as Record<string, unknown>)["binding_generation"]).toBe("four");
+  expect((carried as Record<string, unknown>)["brand_new_field"]).toEqual({ nested: [1, 2, 3] });
+  // Paseo still merges only its native ids on the new observation.
+  expect(carried.plane_identity?.["paseo_agent_id"]).toBe(reconstructed.replay.agent.id);
+  expect(typeof carried.plane_identity?.["paseo_server_id"]).toBe("string");
+});

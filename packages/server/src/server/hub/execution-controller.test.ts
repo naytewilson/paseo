@@ -61,6 +61,7 @@ class ControlledHubExecutionAgents implements HubExecutionAgents {
         id: "agent-shutdown",
         status: "running",
       } as AgentSnapshotPayload,
+      correlation: null,
     });
   }
 }

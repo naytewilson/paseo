@@ -288,6 +288,7 @@ describe("Hub session protocol", () => {
         executionId: "execution-1",
         agentId: "agent-1",
         agent,
+        correlation: null,
         success: true,
         error: null,
       },
@@ -304,7 +305,7 @@ describe("Hub session protocol", () => {
     },
     {
       type: "hub.execution.agent.update",
-      payload: { executionId: "execution-1", agentId: "agent-1", agent },
+      payload: { executionId: "execution-1", agentId: "agent-1", agent, correlation: null },
     },
     {
       type: "hub.execution.agent.stream",
@@ -312,6 +313,7 @@ describe("Hub session protocol", () => {
         executionId: "execution-1",
         agentId: "agent-1",
         event: { type: "turn_started", provider: "codex" },
+        correlation: null,
       },
     },
   ])("accepts outbound variant $type", (message) => {
@@ -322,7 +324,7 @@ describe("Hub session protocol", () => {
   test("rejects a Hub update whose correlated agent ids disagree", () => {
     const malformed = {
       type: "hub.execution.agent.update",
-      payload: { executionId: "execution-1", agentId: "agent-2", agent },
+      payload: { executionId: "execution-1", agentId: "agent-2", agent, correlation: null },
     };
 
     expect(SessionOutboundMessageSchema.safeParse(malformed).success).toBe(true);

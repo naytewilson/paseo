@@ -113,6 +113,7 @@ export class HubExecutionController {
         requestId: message.requestId,
         executionId: message.executionId,
         action: message.action,
+        correlation: message.correlation,
       });
     } catch (controlError) {
       error = controlError instanceof Error ? controlError.message : String(controlError);
@@ -161,6 +162,7 @@ export class HubExecutionController {
         env: message.env,
         mcpServers: message.mcpServers,
         worktree: message.worktree,
+        correlation: message.correlation,
       });
       if (this.closed) return;
       this.send({
@@ -170,6 +172,7 @@ export class HubExecutionController {
           executionId: message.executionId,
           agentId: result.agent.id,
           agent: result.agent,
+          correlation: result.correlation,
           success: true,
           ...(message.toolPolicy ? { toolPolicyApplied: true as const } : {}),
           error: null,
@@ -184,6 +187,7 @@ export class HubExecutionController {
           executionId: message.executionId,
           agentId: null,
           agent: null,
+          correlation: null,
           success: false,
           error: toHubCreateError(error),
         },
@@ -200,6 +204,7 @@ export class HubExecutionController {
           executionId: event.executionId,
           agentId: event.agent.id,
           agent: event.agent,
+          correlation: event.correlation,
         },
       });
       return;
@@ -210,6 +215,7 @@ export class HubExecutionController {
         executionId: event.executionId,
         agentId: event.agentId,
         event: event.event,
+        correlation: event.correlation,
       },
     });
   }
