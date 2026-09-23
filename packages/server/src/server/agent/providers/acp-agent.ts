@@ -1740,6 +1740,12 @@ export class ACPAgentClient implements AgentClient {
 export class ACPAgentSession implements AgentSession, ACPClient {
   readonly provider: string;
   readonly capabilities: AgentCapabilityFlags;
+  /**
+   * Every ACP provider keeps an OS child process alive for lazy resume; the
+   * daemon's idle-reclamation sweep may close it once the agent sits idle
+   * past the TTL. Records stay and resume lazily, so no work is lost.
+   */
+  readonly idleReclaimEligible = true;
 
   private readonly logger: Logger;
   private readonly runtimeSettings?: ProviderRuntimeSettings;

@@ -91,6 +91,68 @@ import { withTimeout } from "../../utils/promise-timeout.js";
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
+
+// Idle reclamation: finished/idle agents whose provider keeps an OS child
+// process resident for lazy resume (all ACP providers, e.g. Devin's `devin acp`
+// child rescanning skills on its own ~15 s timer) get their child torn down
+// once they sit idle past the TTL. Teardown uses the normal closeAgent path,
+// so the agent record persists and the next steer resumes lazily.
+const IDLE_RECLAIM_ENABLED_ENV = "PASEO_IDLE_RECLAIM_ENABLED";
+const IDLE_RECLAIM_SWEEP_INTERVAL_MS_ENV = "PASEO_IDLE_RECLAIM_SWEEP_INTERVAL_MS";
+const IDLE_RECLAIM_TTL_MS_ENV = "PASEO_IDLE_RECLAIM_TTL_MS";
+const DEFAULT_IDLE_RECLAIM_SWEEP_INTERVAL_MS = 60_000;
+const DEFAULT_IDLE_RECLAIM_TTL_MS = 30 * 60_000;
+
+export interface AgentIdleReclamationOptions {
+  enabled?: boolean;
+  sweepIntervalMs?: number;
+  idleTtlMs?: number;
+}
+
+export interface AgentIdleReclamationConfig {
+  enabled: boolean;
+  sweepIntervalMs: number;
+  idleTtlMs: number;
+}
+
+function parseIdleReclaimEnabledEnv(fallback: boolean): boolean {
+  const raw = process.env[IDLE_RECLAIM_ENABLED_ENV]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") {
+    return false;
+  }
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") {
+    return true;
+  }
+  return fallback;
+}
+
+function parseIdleReclaimMsEnv(envName: string, fallback: number): number {
+  const parsed = Number.parseFloat(process.env[envName] ?? "");
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+export function resolveIdleReclamationConfig(
+  options?: AgentIdleReclamationOptions,
+): AgentIdleReclamationConfig {
+  return {
+    enabled: options?.enabled ?? parseIdleReclaimEnabledEnv(true),
+    sweepIntervalMs:
+      options?.sweepIntervalMs ??
+      parseIdleReclaimMsEnv(
+        IDLE_RECLAIM_SWEEP_INTERVAL_MS_ENV,
+        DEFAULT_IDLE_RECLAIM_SWEEP_INTERVAL_MS,
+      ),
+    idleTtlMs:
+      options?.idleTtlMs ??
+      parseIdleReclaimMsEnv(IDLE_RECLAIM_TTL_MS_ENV, DEFAULT_IDLE_RECLAIM_TTL_MS),
+  };
+}
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
   supportsSessionPersistence: true,
@@ -306,6 +368,7 @@ export interface AgentManagerOptions {
   appendSystemPrompt?: string;
   agentStreamCoalesceWindowMs?: number;
   rescueTimeouts?: AgentManagerRescueTimeouts;
+  idleReclamation?: AgentIdleReclamationOptions;
   beforeSteerUnavailableFallback?: (input: {
     agentId: string;
     expectedTurnId: string;
@@ -712,6 +775,9 @@ export class AgentManager {
   private readonly reloadedSessionCloses = new WeakMap<AgentSession, Promise<void>>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
+  private readonly idleReclamationConfig: AgentIdleReclamationConfig;
+  private readonly lastSessionActivityMs = new Map<string, number>();
+  private idleReclaimTimer: ReturnType<typeof setInterval> | null = null;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
   private paseoToolsEnabled = true;
@@ -749,6 +815,7 @@ export class AgentManager {
         options.rescueTimeouts?.interruptSessionMs ?? INTERRUPT_SESSION_TIMEOUT_MS,
     };
     this.beforeSteerUnavailableFallback = options.beforeSteerUnavailableFallback;
+    this.idleReclamationConfig = resolveIdleReclamationConfig(options.idleReclamation);
     this.agentStreamCoalescer = new AgentStreamCoalescer({
       windowMs: options.agentStreamCoalesceWindowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
       timers: { setTimeout, clearTimeout },
@@ -811,6 +878,121 @@ export class AgentManager {
 
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
+    this.stopIdleReclamation();
+  }
+
+  /**
+   * Starts the periodic idle-reclamation sweep. Finished/idle agents whose
+   * session opts into reclamation (ACP children) are closed via the normal
+   * closeAgent path once they sit idle past the configured TTL. Records
+   * persist, so the next steer resumes lazily. Safe to call repeatedly.
+   */
+  startIdleReclamation(): void {
+    if (this.idleReclaimTimer) {
+      return;
+    }
+    if (!this.idleReclamationConfig.enabled) {
+      this.logger.info("agent.manager.idle_reclamation.disabled");
+      return;
+    }
+    this.idleReclaimTimer = setInterval(() => {
+      void this.runIdleReclamationSweep().catch((error) => {
+        this.logger.error({ err: error }, "agent.manager.idle_reclamation.sweep_failed");
+      });
+    }, this.idleReclamationConfig.sweepIntervalMs);
+    this.idleReclaimTimer.unref?.();
+    this.logger.info(
+      {
+        sweepIntervalMs: this.idleReclamationConfig.sweepIntervalMs,
+        idleTtlMs: this.idleReclamationConfig.idleTtlMs,
+      },
+      "agent.manager.idle_reclamation.started",
+    );
+  }
+
+  stopIdleReclamation(): void {
+    if (this.idleReclaimTimer) {
+      clearInterval(this.idleReclaimTimer);
+      this.idleReclaimTimer = null;
+    }
+  }
+
+  getIdleReclamationConfig(): AgentIdleReclamationConfig {
+    return { ...this.idleReclamationConfig };
+  }
+
+  /**
+   * Runs one idle-reclamation pass. Returns the ids that were closed.
+   * Exposed (rather than only on the timer) so tests and tooling can drive a
+   * deterministic pass. nowMs defaults to Date.now(); tests pass explicit
+   * timestamps to simulate elapsed idle time.
+   */
+  async runIdleReclamationSweep(nowMs: number = Date.now()): Promise<string[]> {
+    const reclaimed: string[] = [];
+    if (!this.idleReclamationConfig.enabled) {
+      return reclaimed;
+    }
+    if (!this.acceptingAgentRegistrations) {
+      return reclaimed;
+    }
+    for (const agent of Array.from(this.agents.values())) {
+      if (!this.isIdleReclamationEligible(agent, nowMs)) {
+        continue;
+      }
+      const idleMs = nowMs - (this.lastSessionActivityMs.get(agent.id) ?? nowMs);
+      try {
+        await this.closeAgent(agent.id);
+        reclaimed.push(agent.id);
+        this.logger.info(
+          { agentId: agent.id, provider: agent.provider, idleMs },
+          "agent.manager.idle_reclamation.closed_idle_agent",
+        );
+      } catch (error) {
+        this.logger.warn(
+          { err: error, agentId: agent.id },
+          "agent.manager.idle_reclamation.close_failed",
+        );
+      }
+    }
+    return reclaimed;
+  }
+
+  private isIdleReclamationEligible(agent: LiveManagedAgent, nowMs: number): boolean {
+    // Only finished/idle turns. Running agents, pending runs, and agents
+    // awaiting a permission decision are never reclaimed.
+    if (agent.lifecycle !== "idle") {
+      return false;
+    }
+    if (this.hasInFlightRun(agent.id)) {
+      return false;
+    }
+    if (agent.pendingPermissions.size > 0) {
+      return false;
+    }
+    if (agent.pendingReplacement) {
+      return false;
+    }
+    // Only sessions that keep an OS child process resident for lazy resume
+    // (all ACP providers) opt in via idleReclaimEligible.
+    if (agent.session.idleReclaimEligible !== true) {
+      return false;
+    }
+    // A desktop tab has the agent open in front of a human; leave it resident.
+    if (hasOpenAgentTab(agent.labels)) {
+      return false;
+    }
+    // Closed and archived agents are removed from this.agents when their
+    // runtime closes, so they never appear here. Unknown activity history
+    // is a hard no: never reclaim what we cannot prove idle.
+    const lastActivityMs = this.lastSessionActivityMs.get(agent.id);
+    if (lastActivityMs === undefined) {
+      return false;
+    }
+    return nowMs - lastActivityMs >= this.idleReclamationConfig.idleTtlMs;
+  }
+
+  private touchSessionActivity(agentId: string, nowMs: number = Date.now()): void {
+    this.lastSessionActivityMs.set(agentId, nowMs);
   }
 
   setPaseoToolsEnabled(enabled: boolean): void {
@@ -3464,6 +3646,7 @@ export class AgentManager {
 
       this.assertAcceptingAgentRegistrations();
       this.agents.set(resolvedAgentId, managed);
+      this.touchSessionActivity(resolvedAgentId, now.getTime());
       registered = true;
       // Initialize previousStatus to track transitions
       this.previousStatuses.set(resolvedAgentId, managed.lifecycle);
@@ -3644,6 +3827,7 @@ export class AgentManager {
   ): ManagedAgentClosed {
     this.agentStreamCoalescer.flushAndDiscard(agent.id);
     this.agents.delete(agent.id);
+    this.lastSessionActivityMs.delete(agent.id);
     this.previousStatuses.delete(agent.id);
     if (agent.unsubscribeSession) {
       agent.unsubscribeSession();
@@ -3696,6 +3880,10 @@ export class AgentManager {
   }
 
   private enqueueSessionEvent(agentId: string, event: AgentStreamEvent): void {
+    // Every provider-originated stream event (turn_started, timeline chunks,
+    // turn_completed/failed/canceled, permissions) proves the child is doing
+    // work or the user is engaged: it resets the idle-reclamation clock.
+    this.touchSessionActivity(agentId);
     this.logger.trace(
       {
         agentId,

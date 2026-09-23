@@ -685,6 +685,15 @@ export interface AgentSession {
   interrupt(): Promise<void>;
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
+  /**
+   * Set true by sessions that keep an OS child process resident purely for
+   * lazy resume (all ACP sessions, e.g. Devin's `devin acp` child, which keeps
+   * rescanning skill sources on its own timer while idle). Lets the daemon's
+   * idle-reclamation sweep close the child once the agent has been idle past
+   * the configured TTL. The agent record persists and resumes lazily on next
+   * use, so this is off by default and strictly opt-in.
+   */
+  readonly idleReclaimEligible?: boolean;
   listCommands?(): Promise<AgentSlashCommand[]>;
   setModel?(modelId: string | null): Promise<void>;
   setThinkingOption?(thinkingOptionId: string | null): Promise<void | AgentProviderNotice>;

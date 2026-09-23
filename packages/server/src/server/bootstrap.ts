@@ -1802,6 +1802,11 @@ export async function createPaseoDaemon(
       // model loading doesn't block the server from accepting connections.
       speechService.start();
       scriptHealthMonitor.start();
+      // Reclaim finished/idle ACP children (e.g. Devin's `devin acp`, which
+      // keeps rescanning skills while idle) once they sit idle past the TTL.
+      // Records persist; the next steer resumes lazily. No-op when disabled
+      // via PASEO_IDLE_RECLAIM_ENABLED=0.
+      agentManager.startIdleReclamation();
     } catch (error) {
       unsubscribePluginProviders();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
