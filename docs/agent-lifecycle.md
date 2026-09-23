@@ -25,8 +25,18 @@ Reload releases the old runtime before resuming its durable session: an idle pro
 still own an exclusive writer. A close failure retains that runtime for cleanup and blocks the
 replacement. Once closure succeeds, a failed resume leaves the durable agent closed and retryable.
 
-Idle agents remain resident indefinitely. Runtime closure happens only through an explicit lifecycle
-action such as archive, replacement, reload, workspace teardown, or daemon shutdown.
+Idle agents stay resident until the idle-reclamation sweep or an explicit lifecycle action closes them.
+The sweep runs on a timer (`AgentManager.startIdleReclamation()`, started by the daemon at boot) and
+closes only finished/idle agents whose session keeps an OS child process alive purely for lazy resume —
+all ACP providers opt in via `AgentSession.idleReclaimEligible` (e.g. Devin's `devin acp` child, which
+keeps rescanning its skill sources on its own timer while idle). An agent is eligible only when it has
+no active run, no pending permission decision, no open desktop tab, and no provider activity for the
+whole TTL. Teardown is the normal `closeAgent` path, so the record persists and the next prompt
+resumes lazily through `ensureAgentLoaded()`; nothing about the agent's identity or history changes.
+Tune it with `PASEO_IDLE_RECLAIM_ENABLED` (default on), `PASEO_IDLE_RECLAIM_SWEEP_INTERVAL_MS`
+(default 60000), and `PASEO_IDLE_RECLAIM_TTL_MS` (default 1800000 = 30 minutes). Set
+`PASEO_IDLE_RECLAIM_ENABLED=0` to keep the old behavior: closure only through archive, replacement,
+reload, workspace teardown, or daemon shutdown.
 
 A provider runtime can still die on its own — crash, OOM kill, host suspend. Work the agent parked
 inside that process dies with it: Claude Code's background Bash shells, `Monitor` watches, and
