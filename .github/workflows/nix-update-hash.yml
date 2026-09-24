@@ -17,6 +17,7 @@ on:
       - "scripts/update-nix.sh"
       - "scripts/fix-lockfile.mjs"
       - ".github/workflows/nix-update-hash.yml"
+  workflow_dispatch:
 
 permissions:
   contents: write
