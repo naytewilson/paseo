@@ -89,9 +89,19 @@ function ensureWebSocketMatchesHubOrigin(hubOrigin: string, webSocketUrl: string
 
 export class DirectHubRelationshipRemote implements HubRelationshipRemote {
   private readonly requestTimeoutMs: number;
+  private readonly socketHeartbeatIntervalMs: number;
+  private readonly socketHeartbeatTimeoutMs: number;
 
-  constructor(options: { requestTimeoutMs?: number } = {}) {
+  constructor(
+    options: {
+      requestTimeoutMs?: number;
+      socketHeartbeatIntervalMs?: number;
+      socketHeartbeatTimeoutMs?: number;
+    } = {},
+  ) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
+    this.socketHeartbeatIntervalMs = options.socketHeartbeatIntervalMs ?? 15_000;
+    this.socketHeartbeatTimeoutMs = options.socketHeartbeatTimeoutMs ?? 10_000;
   }
 
   async enroll(input: HubEnrollment): Promise<HubEnrollmentResult> {
@@ -171,13 +181,69 @@ export class DirectHubRelationshipRemote implements HubRelationshipRemote {
       },
     });
     let settled = false;
+    let heartbeatDelay: ReturnType<typeof setTimeout> | undefined;
+    let heartbeatDeadline: ReturnType<typeof setTimeout> | undefined;
+
+    const clearHeartbeat = () => {
+      if (heartbeatDelay !== undefined) clearTimeout(heartbeatDelay);
+      if (heartbeatDeadline !== undefined) clearTimeout(heartbeatDeadline);
+      heartbeatDelay = undefined;
+      heartbeatDeadline = undefined;
+    };
+
+    const failSocket = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearHeartbeat();
+      socket.terminate();
+      events.failed(error);
+    };
+
+    const scheduleHeartbeat = () => {
+      if (settled) return;
+      heartbeatDelay = setTimeout(() => {
+        heartbeatDelay = undefined;
+        if (settled) return;
+        if (socket.readyState !== WebSocket.OPEN) {
+          failSocket(new Error("Hub WebSocket heartbeat found socket not open"));
+          return;
+        }
+
+        const onPong = () => {
+          if (settled) return;
+          if (heartbeatDeadline !== undefined) clearTimeout(heartbeatDeadline);
+          heartbeatDeadline = undefined;
+          socket.off("pong", onPong);
+          scheduleHeartbeat();
+        };
+
+        socket.once("pong", onPong);
+        heartbeatDeadline = setTimeout(() => {
+          heartbeatDeadline = undefined;
+          socket.off("pong", onPong);
+          failSocket(new Error("Hub WebSocket heartbeat timed out"));
+        }, this.socketHeartbeatTimeoutMs);
+        heartbeatDeadline.unref?.();
+
+        try {
+          socket.ping();
+        } catch (error) {
+          socket.off("pong", onPong);
+          failSocket(error instanceof Error ? error : new Error(String(error)));
+        }
+      }, this.socketHeartbeatIntervalMs);
+      heartbeatDelay.unref?.();
+    };
+
     socket.once("upgrade", (response) => {
       if (response.headers["x-paseo-session-protocol"] === "1") {
         sessionProtocol = "session-v1";
       }
     });
     socket.once("open", () => {
-      if (!settled) events.connected(socket as WebSocketLike, sessionProtocol);
+      if (settled) return;
+      events.connected(socket as WebSocketLike, sessionProtocol);
+      scheduleHeartbeat();
     });
     socket.once("unexpected-response", (_request, response) => {
       if (settled) {
@@ -185,6 +251,7 @@ export class DirectHubRelationshipRemote implements HubRelationshipRemote {
         return;
       }
       settled = true;
+      clearHeartbeat();
       response.destroy();
       socket.terminate();
       if (response.statusCode === 401 || response.statusCode === 403) {
@@ -196,11 +263,13 @@ export class DirectHubRelationshipRemote implements HubRelationshipRemote {
     socket.once("close", (code) => {
       if (settled) return;
       settled = true;
+      clearHeartbeat();
       events.closed(code);
     });
     socket.once("error", (error) => {
       if (settled) return;
       settled = true;
+      clearHeartbeat();
       socket.terminate();
       events.failed(error);
     });
