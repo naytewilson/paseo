@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import semver from "semver";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(process.argv[2] ?? path.join(root, "..", "paseo-maintained-artifacts"));
@@ -46,21 +47,28 @@ if (names.some((name) => packages.get(name).version !== version)) {
 const stage = mkdtempSync(path.join(os.tmpdir(), "paseo-maintained-pack-"));
 const files = {};
 const hash = (filename) => createHash("sha256").update(readFileSync(filename)).digest("hex");
-function resolveExternalRoot(dependency) {
+function resolveExternalRoot(dependency, range) {
+  const candidates = [];
   for (const workspace of names) {
     const direct = path.join(root, "packages", workspace, "node_modules", dependency);
-    if (existsSync(path.join(direct, "package.json"))) return direct;
+    if (existsSync(path.join(direct, "package.json"))) candidates.push(direct);
     try {
       const require = createRequire(path.join(root, "packages", workspace, "package.json"));
       const resolved = require.resolve(dependency);
       const candidate = findPackageRoot(path.dirname(resolved), dependency);
-      if (candidate) return candidate;
+      if (candidate) candidates.push(candidate);
     } catch {
       // Try the next workspace's dependency tree.
     }
   }
   const rootDirect = path.join(root, "node_modules", dependency);
-  if (existsSync(path.join(rootDirect, "package.json"))) return rootDirect;
+  if (existsSync(path.join(rootDirect, "package.json"))) candidates.push(rootDirect);
+  for (const candidate of candidates) {
+    const candidateVersion = JSON.parse(
+      readFileSync(path.join(candidate, "package.json"), "utf8"),
+    ).version;
+    if (semver.satisfies(candidateVersion, range)) return candidate;
+  }
   return null;
 }
 function findPackageRoot(start, dependency) {
@@ -78,7 +86,7 @@ function findPackageRoot(start, dependency) {
 }
 for (let index = 0; index < externalDependencies.size; index += 1) {
   const dependency = [...externalDependencies.keys()][index];
-  const source = resolveExternalRoot(dependency);
+  const source = resolveExternalRoot(dependency, externalDependencies.get(dependency));
   if (!source) throw new Error(`Missing external dependency: ${dependency}`);
   const packageJson = JSON.parse(readFileSync(path.join(source, "package.json"), "utf8"));
   for (const [nested, range] of Object.entries(packageJson.dependencies ?? {})) {
@@ -157,7 +165,7 @@ for (const name of names) {
   addCritical(name, "package.json", target);
 }
 for (const dependency of externalDependencies.keys()) {
-  const source = resolveExternalRoot(dependency);
+  const source = resolveExternalRoot(dependency, externalDependencies.get(dependency));
   if (!source) throw new Error(`Missing external dependency: ${dependency}`);
   const target = path.join(stage, "node_modules", dependency);
   mkdirSync(path.dirname(target), { recursive: true });
