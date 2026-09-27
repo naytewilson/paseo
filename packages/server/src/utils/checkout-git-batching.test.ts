@@ -77,7 +77,7 @@ describe("checkout git diff batching", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("uses per-file tracked git diff commands for tracked file diffs", async () => {
+  it("uses one bounded tracked git diff command for a small batch", async () => {
     const result = await getCheckoutDiff(repoDir, {
       mode: "uncommitted",
       includeStructured: false,
@@ -85,6 +85,6 @@ describe("checkout git diff batching", () => {
 
     expect(result.diff).toContain("file-0.txt");
     expect(result.diff).toContain("file-19.txt");
-    expect(spawnCounters.trackedTextDiffCalls).toBe(20);
+    expect(spawnCounters.trackedTextDiffCalls).toBe(1);
   });
 });

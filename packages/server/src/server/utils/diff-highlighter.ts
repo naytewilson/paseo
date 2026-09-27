@@ -248,6 +248,16 @@ function hasOversizedDiffLine(file: ParsedDiffFile): boolean {
   return false;
 }
 
+/**
+ * Full-file Git reads are only useful when the diff can be syntax-highlighted.
+ * Callers use this gate to avoid one `git show` subprocess per changed path for
+ * binary, plain-text, or oversized diffs; the hunk reconstruction remains the
+ * exact fallback in `highlightDiffWithFileContent`.
+ */
+export function shouldLoadFullFileContentForHighlight(file: ParsedDiffFile): boolean {
+  return isLanguageSupported(file.path) && !hasOversizedDiffLine(file);
+}
+
 function buildTokenLookup(
   lineMap: Map<number, string>,
   highlighted: HighlightToken[][],

@@ -11,6 +11,7 @@ import {
   highlightDiffWithFileContent,
   parseAndHighlightDiff,
   parseDiff,
+  shouldLoadFullFileContentForHighlight,
 } from "../server/utils/diff-highlighter.js";
 import { parseGitHubRepoFromRemote } from "../server/workspace-git-metadata.js";
 import { createGitHubService } from "../services/github-service.js";
@@ -639,7 +640,9 @@ function buildGitDiffArgs(args: { ignoreWhitespace?: boolean; extra: string[] })
 }
 
 const TRACKED_DIFF_NUMSTAT_MAX_BYTES = 2 * 1024 * 1024; // 2MB
-const TRACKED_DIFF_BATCH_SIZE = 8;
+const TRACKED_DIFF_BATCH_MAX_PATHS = 512;
+const TRACKED_DIFF_BATCH_MAX_PATH_BYTES = 64 * 1024;
+const TRACKED_DIFF_FALLBACK_CONCURRENCY = 8;
 const EMPTY_TREE_OBJECT_ID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 function isUnbornHeadDiffError(error: unknown): boolean {
@@ -730,6 +733,57 @@ async function getTrackedDiffTextForPath(input: {
     text: result.stdout,
     truncated: result.truncated,
   };
+}
+
+function chunkTrackedDiffPaths(paths: string[]): string[][] {
+  const batches: string[][] = [];
+  let batch: string[] = [];
+  let batchBytes = 0;
+
+  for (const path of paths) {
+    // Stay below macOS' smaller ARG_MAX as well as Linux's per-argument and
+    // per-process limits. The path is one argv entry; account for its trailing NUL.
+    const pathBytes = Buffer.byteLength(path, "utf8") + 1;
+    if (
+      batch.length > 0 &&
+      (batch.length >= TRACKED_DIFF_BATCH_MAX_PATHS ||
+        batchBytes + pathBytes > TRACKED_DIFF_BATCH_MAX_PATH_BYTES)
+    ) {
+      batches.push(batch);
+      batch = [];
+      batchBytes = 0;
+    }
+    batch.push(path);
+    batchBytes += pathBytes;
+  }
+
+  if (batch.length > 0) {
+    batches.push(batch);
+  }
+  return batches;
+}
+
+async function getTrackedDiffTextForPaths(input: {
+  cwd: string;
+  refsForDiff: CheckoutDiffRefs;
+  paths: string[];
+  ignoreWhitespace: boolean;
+}): Promise<{ text: string; truncated: boolean }> {
+  const result = await runGitCommand(
+    buildGitDiffArgs({
+      ignoreWhitespace: input.ignoreWhitespace,
+      extra: [...getCheckoutDiffRefArgs(input.refsForDiff), "--", ...input.paths],
+    }),
+    {
+      cwd: input.cwd,
+      envOverlay: READ_ONLY_GIT_ENV,
+      // A complete batch below this cap is also below the existing per-file cap.
+      // If Git crosses it, retry each path with the established per-file limits.
+      maxOutputBytes: PER_FILE_DIFF_MAX_BYTES,
+    },
+  );
+
+  return { text: result.stdout, truncated: result.truncated };
 }
 
 export class NotGitRepoError extends Error {
@@ -2980,11 +3034,16 @@ async function buildHighlightedTrackedDiffFile(input: {
   refsForDiff: CheckoutDiffRefs;
 }): Promise<ParsedDiffFile> {
   const { cwd, change, parsedFile, refsForDiff } = input;
-  const refPath = change.oldPath ?? change.path;
-  const [oldFileContent, newFileContent] = await Promise.all([
-    change.isNew ? null : readGitFileContentAtRef(cwd, refsForDiff.baseRef, refPath),
-    refsForDiff.targetRef ? readGitFileContentAtRef(cwd, refsForDiff.targetRef, change.path) : null,
-  ]);
+  const [oldFileContent, newFileContent] = shouldLoadFullFileContentForHighlight(parsedFile)
+    ? await Promise.all([
+        change.isNew
+          ? null
+          : readGitFileContentAtRef(cwd, refsForDiff.baseRef, change.oldPath ?? change.path),
+        refsForDiff.targetRef
+          ? readGitFileContentAtRef(cwd, refsForDiff.targetRef, change.path)
+          : null,
+      ])
+    : [null, null];
   const highlightedFile = await highlightDiffWithFileContent(parsedFile, cwd, {
     oldFileContent,
     newFileContent,
@@ -3196,37 +3255,65 @@ async function processTrackedChanges(
 
   let trackedDiffText = "";
   let trackedDiffBytes = 0;
-  for (let start = 0; start < trackedDiffPaths.length; start += TRACKED_DIFF_BATCH_SIZE) {
-    const paths = trackedDiffPaths.slice(start, start + TRACKED_DIFF_BATCH_SIZE);
-    const trackedDiffs = await Promise.all(
-      paths.map((path) =>
-        getTrackedDiffTextForPath({
-          cwd,
-          refsForDiff,
-          path,
-          ignoreWhitespace,
-        }),
-      ),
-    );
+  for (const paths of chunkTrackedDiffPaths(trackedDiffPaths)) {
+    if (trackedDiffBytes >= TOTAL_DIFF_MAX_BYTES) {
+      for (const path of paths) {
+        trackedPlaceholderByPath.set(path, {
+          status: "too_large",
+          stat: trackedNumstatByPath.get(path) ?? null,
+        });
+      }
+      continue;
+    }
 
-    for (const fileDiff of trackedDiffs) {
-      if (fileDiff.truncated) {
-        trackedPlaceholderByPath.set(fileDiff.path, {
-          status: "too_large",
-          stat: trackedNumstatByPath.get(fileDiff.path) ?? null,
-        });
-        continue;
+    const batch = await getTrackedDiffTextForPaths({
+      cwd,
+      refsForDiff,
+      paths,
+      ignoreWhitespace,
+    });
+    const batchBytes = Buffer.byteLength(batch.text, "utf8");
+    if (!batch.truncated && trackedDiffBytes + batchBytes <= TOTAL_DIFF_MAX_BYTES) {
+      trackedDiffText += batch.text;
+      trackedDiffBytes += batchBytes;
+      continue;
+    }
+
+    // Preserve the per-file and total-output limits when an aggregate patch is
+    // too large or when it would cross the total diff budget. The fallback
+    // retains the prior behavior and parallelism for this exceptional batch.
+    for (let start = 0; start < paths.length; start += TRACKED_DIFF_FALLBACK_CONCURRENCY) {
+      const pathBatch = paths.slice(start, start + TRACKED_DIFF_FALLBACK_CONCURRENCY);
+      const trackedDiffs = await Promise.all(
+        pathBatch.map((path) =>
+          getTrackedDiffTextForPath({
+            cwd,
+            refsForDiff,
+            path,
+            ignoreWhitespace,
+          }),
+        ),
+      );
+
+      for (const fileDiff of trackedDiffs) {
+        if (fileDiff.truncated) {
+          trackedPlaceholderByPath.set(fileDiff.path, {
+            status: "too_large",
+            stat: trackedNumstatByPath.get(fileDiff.path) ?? null,
+          });
+          continue;
+        }
+        const diffBytes = Buffer.byteLength(fileDiff.text, "utf8");
+        if (trackedDiffBytes + diffBytes > TOTAL_DIFF_MAX_BYTES) {
+          trackedPlaceholderByPath.set(fileDiff.path, {
+            status: "too_large",
+            stat: trackedNumstatByPath.get(fileDiff.path) ?? null,
+          });
+          continue;
+        }
+        trackedDiffBytes += diffBytes;
+        trackedDiffText += fileDiff.text;
       }
-      const diffBytes = Buffer.byteLength(fileDiff.text, "utf8");
-      if (trackedDiffBytes + diffBytes > TOTAL_DIFF_MAX_BYTES) {
-        trackedPlaceholderByPath.set(fileDiff.path, {
-          status: "too_large",
-          stat: trackedNumstatByPath.get(fileDiff.path) ?? null,
-        });
-        continue;
-      }
-      trackedDiffBytes += diffBytes;
-      trackedDiffText += fileDiff.text;
     }
   }
   appendDiff(trackedDiffText);

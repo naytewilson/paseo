@@ -244,14 +244,13 @@ if (source.search !== rpc) throw new Error("Attachment contract was not preserve
       const setup = `import { register } from "node:module";
 register(${JSON.stringify(loaderUrl)});
 register(${JSON.stringify(guardUrl)});`;
+      const nativeTypeScript = (process.features as { typescript?: boolean }).typescript === true;
       const runtime = createTestRuntime({
         spawnChild: () =>
           fork(new URL("./plugin-process.ts", import.meta.url), [], {
-            execArgv: [
-              "--experimental-strip-types",
-              "--import",
-              `data:text/javascript,${encodeURIComponent(setup)}`,
-            ],
+            execArgv: nativeTypeScript
+              ? ["--experimental-strip-types", "--import", `data:text/javascript,${encodeURIComponent(setup)}`]
+              : ["--import", "tsx"],
             serialization: "advanced",
             stdio: ["ignore", "pipe", "pipe", "ipc"],
           }),
