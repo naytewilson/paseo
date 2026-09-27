@@ -13,6 +13,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(process.argv[2] ?? path.join(root, "..", "paseo-maintained-artifacts"));
@@ -45,6 +46,32 @@ if (names.some((name) => packages.get(name).version !== version)) {
 const stage = mkdtempSync(path.join(os.tmpdir(), "paseo-maintained-pack-"));
 const files = {};
 const hash = (filename) => createHash("sha256").update(readFileSync(filename)).digest("hex");
+function resolveExternalRoot(dependency) {
+  for (const workspace of names) {
+    try {
+      const require = createRequire(path.join(root, "packages", workspace, "package.json"));
+      const resolved = require.resolve(dependency);
+      const candidate = findPackageRoot(path.dirname(resolved), dependency);
+      if (candidate) return candidate;
+    } catch {
+      // Try the next workspace's dependency tree.
+    }
+  }
+  return null;
+}
+function findPackageRoot(start, dependency) {
+  let current = start;
+  for (;;) {
+    const manifest = path.join(current, "package.json");
+    if (existsSync(manifest)) {
+      const packageJson = JSON.parse(readFileSync(manifest, "utf8"));
+      if (packageJson.name === dependency) return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
 function copy(relative, destination) {
   const source = path.join(root, relative);
   if (!existsSync(source)) throw new Error(`Missing build output: ${relative}`);
@@ -115,8 +142,8 @@ for (const name of names) {
   addCritical(name, "package.json", target);
 }
 for (const dependency of externalDependencies.keys()) {
-  const source = path.join(root, "node_modules", dependency);
-  if (!existsSync(source)) throw new Error(`Missing external dependency: ${dependency}`);
+  const source = resolveExternalRoot(dependency);
+  if (!source) throw new Error(`Missing external dependency: ${dependency}`);
   const target = path.join(stage, "node_modules", dependency);
   mkdirSync(path.dirname(target), { recursive: true });
   cpSync(source, target, { recursive: true });
