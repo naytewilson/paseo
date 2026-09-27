@@ -48,6 +48,8 @@ const files = {};
 const hash = (filename) => createHash("sha256").update(readFileSync(filename)).digest("hex");
 function resolveExternalRoot(dependency) {
   for (const workspace of names) {
+    const direct = path.join(root, "packages", workspace, "node_modules", dependency);
+    if (existsSync(path.join(direct, "package.json"))) return direct;
     try {
       const require = createRequire(path.join(root, "packages", workspace, "package.json"));
       const resolved = require.resolve(dependency);
