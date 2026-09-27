@@ -4,9 +4,11 @@ import { createTestLogger } from "../../../test-utils/test-logger.js";
 
 const mockState = vi.hoisted(() => ({
   superConstructorOptions: [] as unknown[],
+  resolveModelThinkingOptions: vi.fn(),
 }));
 
 vi.mock("./acp-agent.js", () => ({
+  resolveACPModelThinkingOptions: mockState.resolveModelThinkingOptions,
   DEFAULT_ACP_CAPABILITIES: {
     supportsStreaming: true,
     supportsSessionPersistence: true,
@@ -51,6 +53,7 @@ describe("GenericACPAgentClient", () => {
           },
         },
         defaultCommand: ["hermes", "acp"],
+        catalogModelResolver: mockState.resolveModelThinkingOptions,
         capabilities: {
           supportsStreaming: true,
           supportsSessionPersistence: true,
@@ -64,6 +67,30 @@ describe("GenericACPAgentClient", () => {
         },
       },
     ]);
+  });
+
+  test("allows providers to disable effort discovery or supply their own resolver", () => {
+    const disabled = new GenericACPAgentClient({
+      logger: createTestLogger(),
+      command: ["agent", "acp"],
+      providerParams: { probeModelThinkingOptions: false },
+    });
+    void disabled;
+    expect(mockState.superConstructorOptions.at(-1)).toHaveProperty(
+      "catalogModelResolver",
+      undefined,
+    );
+    const resolver = vi.fn();
+    const custom = new GenericACPAgentClient({
+      logger: createTestLogger(),
+      command: ["agent", "acp"],
+      catalogModelResolver: resolver,
+    });
+    void custom;
+    expect(mockState.superConstructorOptions.at(-1)).toHaveProperty(
+      "catalogModelResolver",
+      resolver,
+    );
   });
 
   test("uses provider params to report MCP support", () => {

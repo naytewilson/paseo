@@ -9,6 +9,7 @@ type CoalescableTimelineItem = Extract<AgentTimelineItem, { type: CoalescableTim
 type CoalescableTimelineEvent = Extract<AgentStreamEvent, { type: "timeline" }> & {
   item: CoalescableTimelineItem;
 };
+type ToolCallTimelineItem = Extract<AgentTimelineItem, { type: "tool_call" }>;
 
 export interface AgentStreamCoalescerTimers {
   setTimeout: (callback: () => void, ms?: number) => ReturnType<typeof setTimeout>;
@@ -73,6 +74,39 @@ function isTerminalToolCall(item: CoalescableTimelineItem): boolean {
     item.type === "tool_call" &&
     (item.status === "completed" || item.status === "failed" || item.status === "canceled")
   );
+}
+
+function mergeDefinedFields<T extends object>(previous: T, incoming: T): T {
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value !== undefined) {
+      Object.assign(merged, { [key]: value });
+    }
+  }
+  return merged;
+}
+
+function mergeToolCallSnapshot(
+  previous: ToolCallTimelineItem,
+  incoming: ToolCallTimelineItem,
+): ToolCallTimelineItem {
+  const detail =
+    previous.detail.type === incoming.detail.type
+      ? mergeDefinedFields(previous.detail, incoming.detail)
+      : incoming.detail;
+  let metadata = previous.metadata;
+  if (incoming.metadata !== undefined) {
+    metadata =
+      previous.metadata === undefined
+        ? incoming.metadata
+        : mergeDefinedFields(previous.metadata, incoming.metadata);
+  }
+
+  return {
+    ...mergeDefinedFields(previous, incoming),
+    detail,
+    ...(metadata !== undefined ? { metadata } : {}),
+  };
 }
 
 function isSameTextStream(previous: PendingTextEntry, next: PendingTextEntry): boolean {
@@ -191,7 +225,17 @@ export class AgentStreamCoalescer {
     };
 
     if (existingIndex !== undefined) {
-      buffer.entries[existingIndex] = entry;
+      const existing = buffer.entries[existingIndex];
+      buffer.entries[existingIndex] =
+        existing?.kind === "tool_call"
+          ? {
+              ...entry,
+              item: mergeToolCallSnapshot(existing.item, entry.item),
+              ...(entry.turnId === undefined && existing.turnId !== undefined
+                ? { turnId: existing.turnId }
+                : {}),
+            }
+          : entry;
       return;
     }
 

@@ -57,6 +57,7 @@ import {
   getFeatureHighlightColor,
   getFeatureTooltip,
   getAgentControlHintKey,
+  parseRuntimeThinkingOption,
   resolveAgentModelSelection,
 } from "@/composer/agent-controls/utils";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -395,6 +396,8 @@ type AgentControlsSlice = {
   model: string | null | undefined;
   features: AgentFeature[] | undefined;
   thinkingOptionId: string | null | undefined;
+  runtimeThinkingOptions: AgentModelDefinition["thinkingOptions"];
+  runtimeDefaultThinkingOptionId: string | null;
   lastUsage: unknown;
 } | null;
 
@@ -407,6 +410,8 @@ function selectAgentControlsSlice(
   if (!currentAgent) {
     return null;
   }
+  const runtimeExtra = currentAgent.runtimeInfo?.extra as Record<string, unknown> | undefined;
+  const runtimeDefaultThinkingOptionId = runtimeExtra?.liveDefaultThinkingOptionId;
   return {
     provider: currentAgent.provider,
     cwd: currentAgent.cwd,
@@ -414,8 +419,50 @@ function selectAgentControlsSlice(
     model: currentAgent.model,
     features: currentAgent.features,
     thinkingOptionId: currentAgent.thinkingOptionId,
+    runtimeThinkingOptions: parseRuntimeThinkingOption(runtimeExtra?.liveThinkingOptions),
+    runtimeDefaultThinkingOptionId:
+      typeof runtimeDefaultThinkingOptionId === "string" ? runtimeDefaultThinkingOptionId : null,
     lastUsage: currentAgent.lastUsage,
   };
+}
+
+function applyRuntimeThinkingContract(
+  models: AgentModelDefinition[] | null,
+  runtimeModelId: string | null,
+  runtimeThinkingOptions: AgentModelDefinition["thinkingOptions"],
+  runtimeDefaultThinkingOptionId: string | null,
+): AgentModelDefinition[] | null {
+  if (!models || !runtimeModelId || !runtimeThinkingOptions) {
+    return models;
+  }
+  return models.map((model) =>
+    model.id === runtimeModelId
+      ? {
+          ...model,
+          thinkingOptions: runtimeThinkingOptions,
+          defaultThinkingOptionId: runtimeDefaultThinkingOptionId ?? model.defaultThinkingOptionId,
+        }
+      : model,
+  );
+}
+
+function useModelsForSelection(
+  models: AgentModelDefinition[] | null,
+  agent: AgentControlsSlice,
+): AgentModelDefinition[] | null {
+  const runtimeModelId = agent?.runtimeModelId ?? null;
+  const runtimeThinkingOptions = agent?.runtimeThinkingOptions;
+  const runtimeDefaultThinkingOptionId = agent?.runtimeDefaultThinkingOptionId ?? null;
+  return useMemo(
+    () =>
+      applyRuntimeThinkingContract(
+        models,
+        runtimeModelId,
+        runtimeThinkingOptions,
+        runtimeDefaultThinkingOptionId,
+      ),
+    [models, runtimeModelId, runtimeThinkingOptions, runtimeDefaultThinkingOptionId],
+  );
 }
 
 function resolveSnapshotSelectedEntry(
@@ -1585,8 +1632,10 @@ export const AgentControls = memo(function AgentControls({
     });
   }, [agentProviderDefinitions, agentProviderModels, snapshotSelectedEntry]);
 
+  const modelsForSelection = useModelsForSelection(models, agent);
+
   const modelSelection = resolveAgentModelSelection({
-    models,
+    models: modelsForSelection,
     runtimeModelId: agent?.runtimeModelId,
     configuredModelId: agent?.model,
     explicitThinkingOptionId: agent?.thinkingOptionId,

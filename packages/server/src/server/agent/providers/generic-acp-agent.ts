@@ -9,6 +9,7 @@ import {
   type ACPClientCapabilityMeta,
   type ACPConfigFeatureOption,
   DEFAULT_ACP_CAPABILITIES,
+  resolveACPModelThinkingOptions,
   type ACPExtensionCommandsParser,
 } from "./acp-agent.js";
 import {
@@ -21,6 +22,7 @@ import {
 export const GenericACPProviderParamsSchema = z
   .object({
     supportsMcpServers: z.boolean().optional(),
+    probeModelThinkingOptions: z.boolean().optional(),
     clientCapabilities: z
       .object({
         fs: z
@@ -76,7 +78,11 @@ export class GenericACPAgentClient extends ACPAgentClient {
       clientCapabilityMeta: options.clientCapabilityMeta,
       configFeatureOptions: options.configFeatureOptions,
       extensionCommandsParser: options.extensionCommandsParser,
-      catalogModelResolver: options.catalogModelResolver,
+      catalogModelResolver:
+        options.catalogModelResolver ??
+        (providerParams.probeModelThinkingOptions !== false
+          ? resolveACPModelThinkingOptions
+          : undefined),
       now: options.now,
     });
 
