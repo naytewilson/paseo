@@ -32,6 +32,12 @@ const packages = new Map(
     JSON.parse(readFileSync(path.join(root, "packages", name, "package.json"), "utf8")),
   ]),
 );
+const externalDependencies = new Map();
+for (const sourcePackage of packages.values()) {
+  for (const [dependency, range] of Object.entries(sourcePackage.dependencies ?? {})) {
+    if (!dependency.startsWith("@getpaseo/")) externalDependencies.set(dependency, range);
+  }
+}
 const version = packages.get("cli").version;
 if (names.some((name) => packages.get(name).version !== version)) {
   throw new Error("Internal package versions differ");
@@ -84,6 +90,7 @@ for (const name of names) {
       addExternalDependencies(stagedPackage.dependencies, packages.get(internal), internal);
     }
     stagedPackage.bundleDependencies = names.slice(1).map((internal) => `@getpaseo/${internal}`);
+    stagedPackage.bundleDependencies.push(...externalDependencies.keys());
     stagedPackage.files = ["bin", "dist", "node_modules", "source-identity.json"];
   }
   if (name === "plugin") {
@@ -106,6 +113,13 @@ for (const name of names) {
   }
   writeFileSync(path.join(target, "package.json"), `${JSON.stringify(stagedPackage, null, 2)}\n`);
   addCritical(name, "package.json", target);
+}
+for (const dependency of externalDependencies.keys()) {
+  const source = path.join(root, "node_modules", dependency);
+  if (!existsSync(source)) throw new Error(`Missing external dependency: ${dependency}`);
+  const target = path.join(stage, "node_modules", dependency);
+  mkdirSync(path.dirname(target), { recursive: true });
+  cpSync(source, target, { recursive: true });
 }
 const identity = { sourceCommit, packageVersion: version, internalPackages: names };
 for (const target of [
