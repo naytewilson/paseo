@@ -14,8 +14,12 @@ required; this focused gate does not replace them.
 
 Updates must be built from a revision retaining these changes. An upstream npm
 `@getpaseo/cli@latest` install or a vendor desktop auto-update does **not** contain a
-local fork commit merely because the old installation was repaired. Do not claim
-durability from edited `node_modules`, an archive edit, or an exact-version preload.
+local fork commit merely because the old installation was repaired. For daemon
+hosts, set `PASEO_CLI_UPDATE_SPEC` to the maintained source package (for example a
+signed internal tarball) so the self-updater carries the same source channel across
+updates. The default remains upstream latest until that channel is configured.
+Do not claim durability from edited `node_modules`, an archive edit, or an
+exact-version preload.
 
 Release acceptance is per host: anvil-node-02 (ANVIL Dell Node), anvil-node-01
 (ANVIL HP Node), and naytes-macbook-neo (Neo). Record the source commit, package

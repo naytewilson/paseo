@@ -3,6 +3,12 @@ import { z } from "zod";
 import { execCommand } from "../../../utils/spawn.js";
 
 export const PASEO_CLI_PACKAGE = "@getpaseo/cli";
+/**
+ * A maintained source channel can override the vendor registry target without
+ * changing the updater code on each host. Leave unset for the normal upstream
+ * release channel.
+ */
+export const PASEO_CLI_UPDATE_SPEC_ENV = "PASEO_CLI_UPDATE_SPEC";
 
 const NPM_PROBE_TIMEOUT_MS = 10_000;
 const NPM_INSTALL_TIMEOUT_MS = 300_000;
@@ -137,7 +143,8 @@ export class DefaultNpmGlobalPaseoCli implements NpmGlobalPaseoCli {
   }
 
   installLatest(): Promise<CommandResult> {
-    return this.runCommand("npm", ["install", "-g", `${PASEO_CLI_PACKAGE}@latest`], {
+    const spec = process.env[PASEO_CLI_UPDATE_SPEC_ENV]?.trim() || `${PASEO_CLI_PACKAGE}@latest`;
+    return this.runCommand("npm", ["install", "-g", spec], {
       timeout: NPM_INSTALL_TIMEOUT_MS,
       maxBuffer: NPM_MAX_BUFFER_BYTES,
     });
