@@ -81,10 +81,7 @@ for (let index = 0; index < externalDependencies.size; index += 1) {
   const source = resolveExternalRoot(dependency);
   if (!source) throw new Error(`Missing external dependency: ${dependency}`);
   const packageJson = JSON.parse(readFileSync(path.join(source, "package.json"), "utf8"));
-  for (const [nested, range] of Object.entries({
-    ...packageJson.dependencies,
-    ...packageJson.optionalDependencies,
-  })) {
+  for (const [nested, range] of Object.entries(packageJson.dependencies ?? {})) {
     if (!nested.startsWith("@getpaseo/") && !externalDependencies.has(nested)) {
       externalDependencies.set(nested, range);
     }
