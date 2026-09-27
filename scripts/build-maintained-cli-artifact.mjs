@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -110,7 +111,7 @@ for (const [name, relatives] of Object.entries({
   for (const relative of relatives) addCritical(name, relative, target);
 }
 mkdirSync(output, { recursive: true });
-const packOutput = mkdtempSync(path.join(os.tmpdir(), "paseo-maintained-tar-"));
+const packOutput = mkdtempSync(path.join(output, ".pack-"));
 const packed = execFileSync(
   "npm",
   ["pack", stage, "--ignore-scripts", "--pack-destination", packOutput, "--json"],
@@ -127,6 +128,7 @@ for (const name of names.slice(1)) {
 const artifact = path.join(output, description.filename.replace(/\.tgz$/, `-${sourceCommit}.tgz`));
 if (existsSync(artifact)) throw new Error(`Immutable artifact already exists: ${artifact}`);
 renameSync(path.join(packOutput, description.filename), artifact);
+rmSync(packOutput, { recursive: true });
 const manifest = {
   sourceCommit,
   artifact,
