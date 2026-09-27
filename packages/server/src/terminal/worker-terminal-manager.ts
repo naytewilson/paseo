@@ -117,6 +117,10 @@ function resolveWorkerExecArgv(): string[] {
     'import { pathToFileURL } from "node:url";',
     `register(${JSON.stringify(loaderUrl)}, pathToFileURL("./"));`,
   ].join(" ");
+  const nativeTypeScript = (process.features as { typescript?: boolean }).typescript === true;
+  if (!nativeTypeScript) {
+    return ["--import", "tsx"];
+  }
   return [
     "--experimental-strip-types",
     "--import",
