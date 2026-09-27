@@ -76,6 +76,20 @@ function findPackageRoot(start, dependency) {
     current = parent;
   }
 }
+for (let index = 0; index < externalDependencies.size; index += 1) {
+  const dependency = [...externalDependencies.keys()][index];
+  const source = resolveExternalRoot(dependency);
+  if (!source) throw new Error(`Missing external dependency: ${dependency}`);
+  const packageJson = JSON.parse(readFileSync(path.join(source, "package.json"), "utf8"));
+  for (const [nested, range] of Object.entries({
+    ...packageJson.dependencies,
+    ...packageJson.optionalDependencies,
+  })) {
+    if (!nested.startsWith("@getpaseo/") && !externalDependencies.has(nested)) {
+      externalDependencies.set(nested, range);
+    }
+  }
+}
 function copy(relative, destination) {
   const source = path.join(root, relative);
   if (!existsSync(source)) throw new Error(`Missing build output: ${relative}`);
