@@ -1,6 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,7 +77,10 @@ for (const name of names) {
   addCritical(name, "package.json", target);
 }
 const identity = { sourceCommit, packageVersion: version, internalPackages: names };
-for (const target of [stage, path.join(stage, "node_modules", "@getpaseo", "server")]) {
+for (const target of [
+  stage,
+  path.join(stage, "node_modules", "@getpaseo", "server", "dist", "server", "server"),
+]) {
   writeFileSync(
     path.join(target, "source-identity.json"),
     `${JSON.stringify(identity, null, 2)}\n`,
@@ -78,7 +89,7 @@ for (const target of [stage, path.join(stage, "node_modules", "@getpaseo", "serv
 addCritical("cli", "source-identity.json", stage);
 addCritical(
   "server",
-  "source-identity.json",
+  "dist/server/server/source-identity.json",
   path.join(stage, "node_modules", "@getpaseo", "server"),
 );
 for (const [name, relatives] of Object.entries({
@@ -99,9 +110,10 @@ for (const [name, relatives] of Object.entries({
   for (const relative of relatives) addCritical(name, relative, target);
 }
 mkdirSync(output, { recursive: true });
+const packOutput = mkdtempSync(path.join(os.tmpdir(), "paseo-maintained-tar-"));
 const packed = execFileSync(
   "npm",
-  ["pack", stage, "--ignore-scripts", "--pack-destination", output, "--json"],
+  ["pack", stage, "--ignore-scripts", "--pack-destination", packOutput, "--json"],
   {
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
@@ -112,7 +124,9 @@ const bundled = new Set(description.bundled);
 for (const name of names.slice(1)) {
   if (!bundled.has(`@getpaseo/${name}`)) throw new Error(`Not bundled: ${name}`);
 }
-const artifact = path.join(output, description.filename);
+const artifact = path.join(output, description.filename.replace(/\.tgz$/, `-${sourceCommit}.tgz`));
+if (existsSync(artifact)) throw new Error(`Immutable artifact already exists: ${artifact}`);
+renameSync(path.join(packOutput, description.filename), artifact);
 const manifest = {
   sourceCommit,
   artifact,
