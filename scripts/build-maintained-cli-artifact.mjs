@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -16,6 +17,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(process.argv[2] ?? path.join(root, "..", "paseo-maintained-artifacts"));
+const baseline = path.resolve(process.argv[3] ?? "");
+if (!process.argv[3]) throw new Error("Pass the verified platform CLI installation as argument 2");
 const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: root,
   encoding: "utf8",
@@ -37,6 +40,11 @@ if (names.some((name) => packages.get(name).version !== version)) {
   throw new Error("Internal package versions differ");
 }
 const stage = mkdtempSync(path.join(os.tmpdir(), "paseo-maintained-pack-"));
+const baselinePackage = JSON.parse(readFileSync(path.join(baseline, "package.json"), "utf8"));
+if (baselinePackage.name !== "@getpaseo/cli" || baselinePackage.version !== version) {
+  throw new Error("Baseline CLI name/version does not match the candidate");
+}
+cpSync(path.join(baseline, "node_modules"), path.join(stage, "node_modules"), { recursive: true });
 const files = {};
 const hash = (filename) => createHash("sha256").update(readFileSync(filename)).digest("hex");
 function copy(relative, destination) {
@@ -49,21 +57,22 @@ function addCritical(packageName, relative, packageRoot) {
   if (!existsSync(target)) throw new Error(`Missing critical file: ${packageName}/${relative}`);
   files[`${packageName}/${relative}`] = hash(target);
 }
-function addExternalDependencies(destination, source, internal) {
-  for (const [dependency, range] of Object.entries(source.dependencies ?? {})) {
-    if (dependency.startsWith("@getpaseo/")) continue;
-    if (dependency === "@agentclientprotocol/sdk" && internal === "plugin") continue;
-    const existing = destination[dependency];
-    if (existing && existing !== range) {
-      throw new Error(`Conflicting external dependency ${dependency}: ${existing} vs ${range}`);
+function addBaselineDependencies(destination) {
+  for (const entry of readdirSync(path.join(stage, "node_modules"))) {
+    const dependencies = entry.startsWith("@")
+      ? readdirSync(path.join(stage, "node_modules", entry)).map((child) => `${entry}/${child}`)
+      : [entry];
+    for (const dependency of dependencies) {
+      const manifest = path.join(stage, "node_modules", dependency, "package.json");
+      if (!existsSync(manifest) || dependency.startsWith("@getpaseo/")) continue;
+      destination[dependency] = JSON.parse(readFileSync(manifest, "utf8")).version;
     }
-    destination[dependency] = range;
   }
 }
-
 for (const name of names) {
   const sourcePackage = packages.get(name);
   const target = name === "cli" ? stage : path.join(stage, "node_modules", "@getpaseo", name);
+  if (name !== "cli") rmSync(target, { recursive: true, force: true });
   mkdirSync(target, { recursive: true });
   copy(`packages/${name}/dist`, path.join(target, "dist"));
   if (name === "cli") copy("packages/cli/bin", path.join(target, "bin"));
@@ -81,9 +90,9 @@ for (const name of names) {
     stagedPackage.dependencies = { ...sourcePackage.dependencies };
     for (const internal of names.slice(1)) {
       stagedPackage.dependencies[`@getpaseo/${internal}`] = version;
-      addExternalDependencies(stagedPackage.dependencies, packages.get(internal), internal);
     }
-    stagedPackage.bundleDependencies = names.slice(1).map((internal) => `@getpaseo/${internal}`);
+    addBaselineDependencies(stagedPackage.dependencies);
+    stagedPackage.bundleDependencies = Object.keys(stagedPackage.dependencies);
     stagedPackage.files = ["bin", "dist", "node_modules", "source-identity.json"];
   }
   if (name === "plugin") {
