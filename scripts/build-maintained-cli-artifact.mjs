@@ -47,8 +47,6 @@ const stage = mkdtempSync(path.join(os.tmpdir(), "paseo-maintained-pack-"));
 const files = {};
 const hash = (filename) => createHash("sha256").update(readFileSync(filename)).digest("hex");
 function resolveExternalRoot(dependency) {
-  const rootDirect = path.join(root, "node_modules", dependency);
-  if (existsSync(path.join(rootDirect, "package.json"))) return rootDirect;
   for (const workspace of names) {
     const direct = path.join(root, "packages", workspace, "node_modules", dependency);
     if (existsSync(path.join(direct, "package.json"))) return direct;
@@ -61,6 +59,8 @@ function resolveExternalRoot(dependency) {
       // Try the next workspace's dependency tree.
     }
   }
+  const rootDirect = path.join(root, "node_modules", dependency);
+  if (existsSync(path.join(rootDirect, "package.json"))) return rootDirect;
   return null;
 }
 function findPackageRoot(start, dependency) {
