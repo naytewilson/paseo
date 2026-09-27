@@ -49,6 +49,17 @@ function addCritical(packageName, relative, packageRoot) {
   if (!existsSync(target)) throw new Error(`Missing critical file: ${packageName}/${relative}`);
   files[`${packageName}/${relative}`] = hash(target);
 }
+function addExternalDependencies(destination, source, internal) {
+  for (const [dependency, range] of Object.entries(source.dependencies ?? {})) {
+    if (dependency.startsWith("@getpaseo/")) continue;
+    if (dependency === "@agentclientprotocol/sdk" && internal === "plugin") continue;
+    const existing = destination[dependency];
+    if (existing && existing !== range) {
+      throw new Error(`Conflicting external dependency ${dependency}: ${existing} vs ${range}`);
+    }
+    destination[dependency] = range;
+  }
+}
 
 for (const name of names) {
   const sourcePackage = packages.get(name);
@@ -70,9 +81,28 @@ for (const name of names) {
     stagedPackage.dependencies = { ...sourcePackage.dependencies };
     for (const internal of names.slice(1)) {
       stagedPackage.dependencies[`@getpaseo/${internal}`] = version;
+      addExternalDependencies(stagedPackage.dependencies, packages.get(internal), internal);
     }
     stagedPackage.bundleDependencies = names.slice(1).map((internal) => `@getpaseo/${internal}`);
     stagedPackage.files = ["bin", "dist", "node_modules", "source-identity.json"];
+  }
+  if (name === "plugin") {
+    // The plugin ACP SDK is newer than the server ACP SDK. Preserve the exact
+    // nested package instead of letting Node resolve the server's old copy.
+    stagedPackage.bundleDependencies = ["@agentclientprotocol/sdk"];
+    const sdk = path.join(
+      root,
+      "packages",
+      "plugin",
+      "node_modules",
+      "@agentclientprotocol",
+      "sdk",
+    );
+    if (!existsSync(sdk)) throw new Error("Missing plugin ACP SDK build dependency");
+    mkdirSync(path.join(target, "node_modules", "@agentclientprotocol"), { recursive: true });
+    cpSync(sdk, path.join(target, "node_modules", "@agentclientprotocol", "sdk"), {
+      recursive: true,
+    });
   }
   writeFileSync(path.join(target, "package.json"), `${JSON.stringify(stagedPackage, null, 2)}\n`);
   addCritical(name, "package.json", target);
