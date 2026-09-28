@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -44,7 +45,45 @@ const baselinePackage = JSON.parse(readFileSync(path.join(baseline, "package.jso
 if (baselinePackage.name !== "@getpaseo/cli" || baselinePackage.version !== version) {
   throw new Error("Baseline CLI name/version does not match the candidate");
 }
-cpSync(path.join(baseline, "node_modules"), path.join(stage, "node_modules"), { recursive: true });
+function resolveBaselineDependencyTree(cliRoot) {
+  const nested = path.join(cliRoot, "node_modules");
+  if (existsSync(nested)) {
+    return { nodeModules: nested, includesCli: false };
+  }
+
+  // npm commonly hoists a package's dependency tree into the install prefix:
+  // <prefix>/node_modules/@getpaseo/cli. Walk the logical path upward so
+  // symlinked installations still resolve against the package location the
+  // caller supplied, while comparing real paths to bind the tree to this CLI.
+  const cliReal = realpathSync(cliRoot);
+  let cursor = path.resolve(cliRoot);
+  while (true) {
+    if (path.basename(cursor) === "node_modules") {
+      const installedCli = path.join(cursor, "@getpaseo", "cli");
+      if (
+        existsSync(path.join(installedCli, "package.json")) &&
+        realpathSync(installedCli) === cliReal
+      ) {
+        return { nodeModules: cursor, includesCli: true };
+      }
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  throw new Error("Unable to resolve baseline CLI dependency tree");
+}
+
+const baselineTree = resolveBaselineDependencyTree(baseline);
+cpSync(baselineTree.nodeModules, path.join(stage, "node_modules"), { recursive: true });
+if (baselineTree.includesCli) {
+  // The stage root itself is the maintained CLI. A hoisted prefix contains the
+  // vendor CLI inside node_modules; remove that duplicate before packing.
+  rmSync(path.join(stage, "node_modules", "@getpaseo", "cli"), {
+    recursive: true,
+    force: true,
+  });
+}
 const files = {};
 const hash = (filename) => createHash("sha256").update(readFileSync(filename)).digest("hex");
 function copy(relative, destination) {
