@@ -10,30 +10,47 @@ permissions:
 
 jobs:
   probe:
-    name: probe slot ${{ matrix.slot }}
+    name: read-only authority map
     runs-on: [self-hosted, Linux, X64, nayte-linux]
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        slot: [1, 2]
     steps:
-      - name: Read-only runner identity
+      - name: Map runner identity and Paseo ownership boundaries
         shell: bash
         run: |
-          set -euo pipefail
-          printf 'slot=%s\n' "${{ matrix.slot }}"
+          set -u
+          echo "== runner =="
           printf 'hostname=%s\n' "$(hostname)"
           printf 'user=%s\n' "$(id -un)"
+          id || true
           printf 'kernel=%s\n' "$(uname -srmo)"
           printf 'home=%s\n' "$HOME"
-          if command -v paseo >/dev/null 2>&1; then
-            printf 'paseo_path=%s\n' "$(command -v paseo)"
-            paseo --version || true
-          else
-            echo 'paseo_path=NOT_FOUND'
-          fi
-          if command -v systemctl >/dev/null 2>&1; then
-            systemctl --user show paseo.service --no-pager               -p ActiveState -p SubState -p UnitFileState -p FragmentPath -p DropInPaths || true
-          fi
+
+          echo "== tool reachability =="
+          for tool in paseo node npm systemctl sudo; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              printf '%s=%s\n' "$tool" "$(command -v "$tool")"
+            else
+              printf '%s=NOT_FOUND\n' "$tool"
+            fi
+          done
+
+          echo "== home-backed identities =="
+          getent passwd | awk -F: '$6 ~ /^\/home\// {print $1 ":" $6}' | sort || true
+
+          echo "== Paseo service file locations visible to runner =="
+          find /etc/systemd /home -maxdepth 6 -type f \( -name 'paseo.service' -o -name '*paseo*.service' \) -print 2>/dev/null | sort || true
+
+          echo "== system-scoped Paseo units =="
+          systemctl --no-pager --all --type=service 2>/dev/null | grep -i paseo || true
+
+          echo "== Paseo-ish process owners/names =="
+          ps -eo user=,pid=,comm= | grep -Ei 'paseo|node|npm' | head -100 || true
+
+          echo "== noninteractive sudo authority =="
+          sudo -n -l 2>&1 || true
+
+          echo "== user-bus probes =="
+          getent passwd | awk -F: '$6 ~ /^\/home\// {print $1}' | while read -r candidate; do
+            echo "-- user=$candidate --"
+            systemctl --machine="$candidate@.host" --user show paseo.service --no-pager               -p ActiveState -p SubState -p UnitFileState -p FragmentPath -p DropInPaths 2>&1 || true
+          done
