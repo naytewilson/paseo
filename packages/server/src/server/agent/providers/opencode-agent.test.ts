@@ -4157,6 +4157,63 @@ describe("OpenCodeAgentClient env", () => {
   });
 });
 
+describe("OpenCodeAgentClient derived provider model namespace", () => {
+  const streamModelTurn = async (
+    providerId: string | undefined,
+    model: string,
+  ): Promise<{ providerID: string; modelID: string } | undefined> => {
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.sessionPromptAsyncEvents = assistantTurnEvents();
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+      ...(providerId === undefined ? {} : { providerId }),
+    });
+    try {
+      const session = await client.createSession({ provider: "opencode", cwd, model });
+      const turn = await collectTurnEvents(streamSession(session, "Say hello"));
+      expect(turn.turnFailed).toBe(false);
+      await session.close();
+      return openCodeClient.calls.sessionPromptAsync[0]?.model as
+        | { providerID: string; modelID: string }
+        | undefined;
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  };
+
+  test("derived StepFun client submits bare model under the stepfun namespace", async () => {
+    expect(await streamModelTurn("stepfun", "step-5-preview")).toEqual({
+      providerID: "stepfun",
+      modelID: "step-5-preview",
+    });
+  }, 120_000);
+
+  test("derived Pareto client submits bare model under the pareto namespace", async () => {
+    expect(await streamModelTurn("pareto", "pareto")).toEqual({
+      providerID: "pareto",
+      modelID: "pareto",
+    });
+  }, 120_000);
+
+  test("base opencode client still defaults bare models to the opencode namespace", async () => {
+    expect(await streamModelTurn(undefined, "big-pickle")).toEqual({
+      providerID: "opencode",
+      modelID: "big-pickle",
+    });
+  }, 120_000);
+
+  test("explicit qualified model is unchanged on a derived client", async () => {
+    expect(await streamModelTurn("stepfun", "anthropic/claude-x")).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-x",
+    });
+  }, 120_000);
+});
+
 describe("OpenCode persisted sessions", () => {
   test("replay hides summaries produced by manual compact", () => {
     const timeline = __openCodeInternals.buildOpenCodeSessionTimeline([
