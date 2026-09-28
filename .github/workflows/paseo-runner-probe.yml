@@ -1,0 +1,39 @@
+name: Paseo Runner Reachability Probe
+
+on:
+  push:
+    branches:
+      - validation/paseo-runner-probe-20260928
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe slot ${{ matrix.slot }}
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        slot: [1, 2]
+    steps:
+      - name: Read-only runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'slot=%s\n' "${{ matrix.slot }}"
+          printf 'hostname=%s\n' "$(hostname)"
+          printf 'user=%s\n' "$(id -un)"
+          printf 'kernel=%s\n' "$(uname -srmo)"
+          printf 'home=%s\n' "$HOME"
+          if command -v paseo >/dev/null 2>&1; then
+            printf 'paseo_path=%s\n' "$(command -v paseo)"
+            paseo --version || true
+          else
+            echo 'paseo_path=NOT_FOUND'
+          fi
+          if command -v systemctl >/dev/null 2>&1; then
+            systemctl --user show paseo.service --no-pager               -p ActiveState -p SubState -p UnitFileState -p FragmentPath -p DropInPaths || true
+          fi
