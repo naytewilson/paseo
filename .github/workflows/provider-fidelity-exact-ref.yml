@@ -1,0 +1,103 @@
+name: Provider Fidelity Exact Ref Validation
+
+on:
+  push:
+    branches:
+      - validation/provider-fidelity-092-14ca68e
+
+permissions:
+  contents: read
+
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+  CANDIDATE_SHA: 14ca68e60b960557965c5dd51be6279986d6e70f
+
+jobs:
+  validate:
+    name: exact-ref validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+
+      - name: Prove source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$CANDIDATE_SHA"
+          test -z "$(git status --porcelain)"
+          printf 'candidate_sha=%s\n' "$actual"
+          git status --short --branch
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Provider fidelity release gate
+        run: npm run test:provider-fidelity
+
+      - name: Updater source-channel regression
+        run: npx vitest run packages/server/src/server/session/daemon/npm-global-cli.test.ts --bail=1
+
+      - name: Build server and CLI stack
+        run: npm run build:server
+
+      - name: Typecheck server stack
+        run: npm run typecheck:server
+
+      - name: Build daemon web UI
+        run: npm run build:daemon-web-ui
+
+      - name: Install browser for V6 reasoning regression
+        run: npx playwright install --with-deps chromium
+
+      - name: Run V6 model/reasoning browser regression
+        run: npm run test:e2e --workspace=@getpaseo/app -- e2e/browser/v6-model-reasoning.spec.ts
+
+      - name: Build maintained 0.9.2 CLI artifact from vendor baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vendor" "$RUNNER_TEMP/maintained" "$RUNNER_TEMP/install"
+          npm install --prefix "$RUNNER_TEMP/vendor" @getpaseo/cli@0.9.2
+          node scripts/build-maintained-cli-artifact.mjs             "$RUNNER_TEMP/maintained"             "$RUNNER_TEMP/vendor/node_modules/@getpaseo/cli"
+          artifact="$(find "$RUNNER_TEMP/maintained" -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          manifest="$artifact.manifest.json"
+          test -n "$artifact"
+          test -f "$manifest"
+          sha256sum "$artifact" | tee "$RUNNER_TEMP/maintained/SHA256SUMS"
+          npm install --prefix "$RUNNER_TEMP/install" "$artifact"
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const root = process.env.RUNNER_TEMP;
+            const pkg = JSON.parse(fs.readFileSync(path.join(root, "install/node_modules/@getpaseo/cli/package.json"), "utf8"));
+            if (pkg.version !== "0.9.2") throw new Error("unexpected installed CLI version: " + pkg.version);
+            console.log("installed_cli_version=" + pkg.version);
+          '
+
+      - name: Dry-run public package contents
+        run: |
+          npm pack --dry-run --ignore-scripts --workspace=@getpaseo/protocol
+          npm pack --dry-run --ignore-scripts --workspace=@getpaseo/server
+          npm pack --dry-run --ignore-scripts --workspace=@getpaseo/cli
+
+      - name: Upload exact-ref validation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-fidelity-exact-ref-14ca68e
+          path: |
+            ${{ runner.temp }}/maintained/
+          if-no-files-found: warn
+          retention-days: 14
