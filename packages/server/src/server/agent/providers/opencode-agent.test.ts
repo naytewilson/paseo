@@ -7,6 +7,7 @@ import { createTestLogger } from "../../../test-utils/test-logger.js";
 import type { Event as OpenCodeEvent } from "@opencode-ai/sdk/v2/client";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import type { OpenCodeEventSource } from "./opencode/event-consumer.js";
+import { OpenCodeBridge } from "./opencode/bridge.js";
 import {
   __openCodeInternals,
   OpenCodeAgentClient,
@@ -4058,6 +4059,98 @@ describe("OpenCodeAgentClient env", () => {
           CHUNK14_PROBE: "expected",
         },
       });
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("merges provider runtimeSettings env so derived providers get a dedicated server", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    runtime.enqueueClient(openCodeClient);
+    const cwd = tmpCwd();
+    // StepFun-style derived provider: launch env lives in the client's
+    // runtimeSettings, while launchContext only carries session keys.
+    // A real bridge is injected (as provider-runtime always creates one), so
+    // the dedicated-server decision hinges on requiresDedicatedOpenCodeServer.
+    const bridge = new OpenCodeBridge({ paseoHome: tmpCwd(), logger: createTestLogger() });
+    const client = new OpenCodeAgentClient(
+      createTestLogger(),
+      {
+        env: {
+          OPENCODE_CONFIG: "/home/nayte/.paseo/opencode/stepfun/opencode.json",
+          XDG_CONFIG_HOME: "/home/nayte/.paseo/opencode/stepfun",
+          STEPFUN_API_KEY: "test-key",
+        },
+      },
+      {
+        serverManager: runtime,
+        createClient: runtime.createClient,
+        bridge,
+      },
+    );
+
+    try {
+      const session = await client.createSession(
+        {
+          provider: "opencode",
+          cwd,
+        },
+        {
+          env: {
+            PASEO_AGENT_ID: "agent-1",
+            PASEO_AGENT_CWD: cwd,
+          },
+        },
+      );
+      await session.close();
+
+      expect(runtime.acquisitions[0]).toMatchObject({
+        kind: "dedicated",
+        env: {
+          OPENCODE_CONFIG: "/home/nayte/.paseo/opencode/stepfun/opencode.json",
+          XDG_CONFIG_HOME: "/home/nayte/.paseo/opencode/stepfun",
+          STEPFUN_API_KEY: "test-key",
+          PASEO_AGENT_ID: "agent-1",
+          PASEO_AGENT_CWD: cwd,
+        },
+      });
+      expect(runtime.acquisitions[0].kind).not.toBe("current");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("default provider with only session env still uses the shared server", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    runtime.enqueueClient(openCodeClient);
+    const cwd = tmpCwd();
+    // Bridge injected as in production; with only session env keys the
+    // default provider must keep using the shared server.
+    const bridge = new OpenCodeBridge({ paseoHome: tmpCwd(), logger: createTestLogger() });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+      bridge,
+    });
+
+    try {
+      const session = await client.createSession(
+        {
+          provider: "opencode",
+          cwd,
+        },
+        {
+          env: {
+            PASEO_AGENT_ID: "agent-1",
+            PASEO_AGENT_CWD: cwd,
+          },
+        },
+      );
+      await session.close();
+
+      expect(runtime.acquisitions[0].kind).toBe("current");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
