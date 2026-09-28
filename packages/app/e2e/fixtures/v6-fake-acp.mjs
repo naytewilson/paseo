@@ -142,4 +142,4 @@ class FakeAgent {
 const input = Writable.toWeb(process.stdout);
 const output = Readable.toWeb(process.stdin);
 const stream = acp.ndJsonStream(input, output);
-new acp.AgentSideConnection((conn) => new FakeAgent(conn), stream);
+void new acp.AgentSideConnection((conn) => new FakeAgent(conn), stream);
