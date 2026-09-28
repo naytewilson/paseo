@@ -10,46 +10,53 @@ permissions:
 
 jobs:
   probe:
-    name: read-only live Paseo snapshot
+    name: read-only ANVIL node status
     runs-on: [self-hosted, Linux, X64, nayte-linux]
     timeout-minutes: 10
     steps:
-      - name: Observe live Dell Paseo process provenance
+      - name: Query Dell and HP read-only status surfaces
         shell: bash
         run: |
-          set -u
-          echo "== host =="
-          hostname
-          id
-
-          echo "== Paseo processes =="
-          ps -eo user=,pid=,comm= | grep -E 'Paseo (Supervisor|Daemon)' || true
-
-          echo "== process filesystem/cgroup provenance =="
-          for pid in $(ps -eo pid=,comm= | awk '$2=="Paseo" {print $1}'); do
-            :
-          done
-          for pid in $(ps -eo user=,pid=,comm= | awk '$1=="nayte" && ($3=="Paseo" || $3=="Paseo Supervisor" || $3=="Paseo Daemon") {print $2}'); do
-            echo "-- pid=$pid --"
-            printf 'exe='; readlink "/proc/$pid/exe" 2>&1 || true
-            printf 'cwd='; readlink "/proc/$pid/cwd" 2>&1 || true
-            printf 'cgroup='; tr '\n' ';' < "/proc/$pid/cgroup" 2>/dev/null || true; echo
-          done
-
-          echo "== cgroup matches for live Paseo pids =="
-          for pid in $(pgrep -u nayte -f 'Paseo' 2>/dev/null || true); do
-            comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
-            case "$comm" in
-              *Paseo*)
-                printf 'pid=%s comm=%s cgroup=' "$pid" "$comm"
-                tr '\n' ';' < "/proc/$pid/cgroup" 2>/dev/null || true
-                echo
-                ;;
-            esac
-          done
-
-          echo "== user manager metadata =="
-          loginctl show-user nayte -p UID -p State -p Linger -p RuntimePath 2>&1 || true
-
-          echo "== listening TCP sockets (no process argv) =="
-          ss -ltn 2>/dev/null || true
+          set -euo pipefail
+          probe() {
+            label="$1"
+            url="$2"
+            tmp="$RUNNER_TEMP/$label-status.json"
+            echo "== $label =="
+            code="$(curl -sS -o "$tmp" -w '%{http_code}' --connect-timeout 5 --max-time 10 "$url/status" || true)"
+            echo "http_status=$code"
+            if [[ "$code" != "200" ]]; then
+              return 0
+            fi
+            LABEL="$label" FILE="$tmp" node <<'NODE'
+          const fs = require("node:fs");
+          const s = JSON.parse(fs.readFileSync(process.env.FILE, "utf8"));
+          const out = {
+            label: process.env.LABEL,
+            schema: s.status_schema_version ?? null,
+            node: s.node ?? null,
+            tailscale: s.tailscale ?? null,
+            scheduler: {
+              active: s.scheduler?.active ?? null,
+              lanes: s.scheduler?.lanes ?? null,
+            },
+            guardian: {
+              admission_paused: s.guardian?.admission_paused ?? null,
+              action: s.guardian?.action ?? null,
+              disk_root_pct_free: s.guardian?.disk_root_pct_free ?? null,
+            },
+            health: {
+              load_1m: s.health?.load_1m ?? null,
+              mem_avail_mb: s.health?.mem_avail_mb ?? null,
+              swap_used_mb: s.health?.swap_used_mb ?? null,
+              disk_ssd_free_mb: s.health?.disk_ssd_free_mb ?? null,
+              disk_hdd_free_mb: s.health?.disk_hdd_free_mb ?? null,
+              data_mounted: s.health?.data_mounted ?? null,
+            },
+            official_task: s.current_work?.official?.task_id ?? null,
+          };
+          console.log(JSON.stringify(out, null, 2));
+          NODE
+          }
+          probe dell http://100.121.148.16:18789
+          probe hp http://100.110.137.51:18789
