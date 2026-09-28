@@ -1,0 +1,92 @@
+name: Provider Fidelity Fast Exact Ref
+
+on:
+  push:
+    branches:
+      - validation/provider-fidelity-092-14ca68e
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: 3417374599bfd149d1c142082ba9e54f6c5a6488
+  BASE_SHA: c67b7158b441bb09026b38d86ae335cc4b49190a
+  ONNXRUNTIME_NODE_INSTALL: skip
+
+jobs:
+  quality-and-artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+
+      - name: Prove exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git status --porcelain)"
+          test "$(git hash-object package-lock.json)" = "76664bdce86717ebccf78017b1863233bc4f70f7"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Format-check changed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA...$CANDIDATE_SHA")
+          npm run format:check:files -- "${changed[@]}"
+
+      - name: Lint changed JS/TS source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t lintable < <(git diff --name-only "$BASE_SHA...$CANDIDATE_SHA" | grep -E '\.(js|jsx|mjs|cjs|ts|tsx)$' || true)
+          if (("${#lintable[@]}" > 0)); then
+            npx oxlint "${lintable[@]}"
+          fi
+
+      - name: Build server and CLI stack
+        run: npm run build:server
+
+      - name: Build and reinstall maintained artifact from clean npm prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vendor" "$RUNNER_TEMP/maintained" "$RUNNER_TEMP/install"
+          npm install --prefix "$RUNNER_TEMP/vendor" @getpaseo/cli@0.9.2
+          node scripts/build-maintained-cli-artifact.mjs             "$RUNNER_TEMP/maintained"             "$RUNNER_TEMP/vendor/node_modules/@getpaseo/cli"
+          artifact="$(find "$RUNNER_TEMP/maintained" -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          test -n "$artifact"
+          test -f "$artifact.manifest.json"
+          sha256sum "$artifact" | tee "$RUNNER_TEMP/maintained/SHA256SUMS"
+          npm install --prefix "$RUNNER_TEMP/install" "$artifact"
+          CANDIDATE_SHA="$CANDIDATE_SHA" RUNNER_TEMP="$RUNNER_TEMP" node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const cliRoot = path.join(process.env.RUNNER_TEMP, "install/node_modules/@getpaseo/cli");
+          const pkg = JSON.parse(fs.readFileSync(path.join(cliRoot, "package.json"), "utf8"));
+          const identity = JSON.parse(fs.readFileSync(path.join(cliRoot, "source-identity.json"), "utf8"));
+          if (pkg.version !== "0.9.2") throw new Error("wrong version: " + pkg.version);
+          if (identity.sourceCommit !== process.env.CANDIDATE_SHA) {
+            throw new Error("wrong source identity: " + identity.sourceCommit);
+          }
+          console.log(JSON.stringify({version: pkg.version, sourceIdentity: identity.sourceCommit}));
+          NODE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paseo-maintained-34173745
+          path: |
+            ${{ runner.temp }}/maintained/
+          if-no-files-found: error
+          retention-days: 14
