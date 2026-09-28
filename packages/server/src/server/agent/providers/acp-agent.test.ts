@@ -204,6 +204,7 @@ interface ACPConfiguredOverrideInternals {
 interface V6SessionInternals extends ACPModelSelectionInternals {
   currentModel: string | null;
   thinkingOptionId: string | null;
+  defaultThinkingOptionId: string | null;
 }
 
 function createSession(
@@ -1853,19 +1854,60 @@ describe("ACP model + reasoning fidelity (V6)", () => {
     expect(setSessionConfigOption).not.toHaveBeenCalled();
   });
 
-  test("setThinkingOption treats 'default' as clear", async () => {
+  test("setThinkingOption passes a literal provider option ID 'default' through to the provider", async () => {
     const session = createSession();
     const internals = asInternals<V6SessionInternals>(session);
     internals.sessionId = "session-1";
-    internals.thinkingOptionId = "high";
-    internals.configOptions = [selectConfigOption("thought_level", ["low", "high"], "low")];
+    internals.currentModel = "sonnet";
+    internals.thinkingOptionId = "low";
+    internals.defaultThinkingOptionId = "low";
+    internals.configOptions = [selectConfigOption("thought_level", ["low", "default"], "low")];
     const setSessionConfigOption = vi.fn(async () => ({ configOptions: [] }));
     internals.connection = { setSessionConfigOption };
 
     await session.setThinkingOption("default");
 
-    await expect(session.getRuntimeInfo()).resolves.toMatchObject({ thinkingOptionId: null });
+    expect(setSessionConfigOption).toHaveBeenCalledWith(
+      expect.objectContaining({ value: "default" }),
+    );
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({
+      thinkingOptionId: "default",
+    });
+  });
+
+  test("setThinkingOption(null) resets an applied level to the provider default via the provider", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.currentModel = "sonnet";
+    internals.thinkingOptionId = "high";
+    internals.defaultThinkingOptionId = "low";
+    internals.configOptions = [selectConfigOption("thought_level", ["low", "high"], "high")];
+    const setSessionConfigOption = vi.fn(async () => ({ configOptions: [] }));
+    internals.connection = { setSessionConfigOption };
+
+    await session.setThinkingOption(null);
+
+    expect(setSessionConfigOption).toHaveBeenCalledWith(expect.objectContaining({ value: "low" }));
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({ thinkingOptionId: "low" });
+  });
+
+  test("setThinkingOption(null) fails visibly when no provider default is known", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.currentModel = "sonnet";
+    internals.thinkingOptionId = "high";
+    internals.defaultThinkingOptionId = null;
+    internals.configOptions = [selectConfigOption("thought_level", ["low", "high"], "high")];
+    const setSessionConfigOption = vi.fn(async () => ({ configOptions: [] }));
+    internals.connection = { setSessionConfigOption };
+
+    await expect(session.setThinkingOption(null)).rejects.toThrow(
+      "claude-acp has no known default thought level; refusing to reset",
+    );
     expect(setSessionConfigOption).not.toHaveBeenCalled();
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({ thinkingOptionId: "high" });
   });
 
   test("setModel invalidates stale thinking and surfaces the provider default", async () => {

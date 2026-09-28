@@ -1855,6 +1855,14 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private currentModel: string | null = null;
   private availableModels: AvailableACPModel[] | null = null;
   private thinkingOptionId: string | null = null;
+  /**
+   * The provider's own default thought level, captured from the pristine
+   * session state before any explicit set. Reset (null) restores this exact
+   * value through the provider's write path — it is never a local-only
+   * clear, and the literal provider option ID "default" is never treated
+   * as a sentinel for it.
+   */
+  private defaultThinkingOptionId: string | null = null;
   private currentTitle: string | null = null;
   private lastActivityAt: string | null = null;
   private configOptions: SessionConfigOption[] = [];
@@ -2433,14 +2441,27 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     if (!this.connection || !this.sessionId) {
       throw new Error("ACP session not initialized");
     }
-    if (!thinkingOptionId || thinkingOptionId === "default") {
-      this.thinkingOptionId = null;
-      return;
-    }
+    // Reset is a tagged operation (null/empty), not the literal string
+    // "default": a provider may legitimately expose an option with that ID,
+    // and swallowing it here would silently drop a valid selection.
+    const requested =
+      typeof thinkingOptionId === "string" && thinkingOptionId.length > 0 ? thinkingOptionId : null;
+    const targetOptionId = requested ?? this.resolveProviderDefaultThinkingOptionId();
+    await this.applyThinkingOptionId(targetOptionId);
+  }
 
+  private resolveProviderDefaultThinkingOptionId(): string {
+    const resetTarget = this.defaultThinkingOptionId;
+    if (!resetTarget) {
+      throw new Error(`${this.provider} has no known default thought level; refusing to reset`);
+    }
+    return resetTarget;
+  }
+
+  private async applyThinkingOptionId(optionId: string): Promise<void> {
     if (this.thinkingOptionWriter) {
-      await this.thinkingOptionWriter(this.connection, this.sessionId, thinkingOptionId);
-      this.thinkingOptionId = thinkingOptionId;
+      await this.thinkingOptionWriter(this.connection!, this.sessionId!, optionId);
+      this.thinkingOptionId = optionId;
       this.pushEvent({
         type: "thinking_option_changed",
         provider: this.provider,
@@ -2456,22 +2477,22 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     if (!option) {
       throw new Error(`${this.provider} does not expose ACP thought-level selection`);
     }
-    const choice = findSelectConfigChoice({ option, value: thinkingOptionId });
+    const choice = findSelectConfigChoice({ option, value: optionId });
     if (!choice) {
       throw new Error(
-        `${this.provider} thinking option '${thinkingOptionId}' is not available for model '${this.currentModel ?? "default"}'`,
+        `${this.provider} thinking option '${optionId}' is not available for model '${this.currentModel ?? "default"}'`,
       );
     }
-    const response = await this.connection.setSessionConfigOption({
-      sessionId: this.sessionId,
+    const response = await this.connection!.setSessionConfigOption({
+      sessionId: this.sessionId!,
       configId: option.id,
-      value: thinkingOptionId,
+      value: optionId,
     });
     this.thinkingOptionId = this.applyConfigOptionResponse({
       response,
       configId: option.id,
       category: "thought_level",
-      requestedValue: thinkingOptionId,
+      requestedValue: optionId,
       label: "thought-level",
     });
     this.pushEvent({
@@ -3020,6 +3041,11 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       transformed.models?.currentModelId ?? deriveCurrentConfigValue(this.configOptions, "model");
     this.thinkingOptionId =
       deriveCurrentConfigValue(this.configOptions, "thought_level") ?? this.thinkingOptionId;
+    // Capture the provider's pristine default once: reset (null) restores
+    // this exact value through the provider, never a local-only clear.
+    if (this.defaultThinkingOptionId === null) {
+      this.defaultThinkingOptionId = deriveCurrentConfigValue(this.configOptions, "thought_level");
+    }
   }
 
   private transformConfigOptions(configOptions: SessionConfigOption[]): SessionConfigOption[] {
@@ -3064,7 +3090,12 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       }
     }
     if (this.config.thinkingOptionId && this.config.thinkingOptionId !== this.thinkingOptionId) {
-      await this.setThinkingOption(this.config.thinkingOptionId);
+      // Config-level "default" means "provider default": it is a reset (null),
+      // not a provider option ID. The literal ID "default" keeps its normal
+      // provider validation inside setThinkingOption.
+      await this.setThinkingOption(
+        this.config.thinkingOptionId === "default" ? null : this.config.thinkingOptionId,
+      );
     }
     const configuredFeatureValues = this.config.featureValues ?? {};
     for (const featureOption of this.configFeatureOptions) {
