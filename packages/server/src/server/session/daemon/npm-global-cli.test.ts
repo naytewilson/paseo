@@ -83,6 +83,33 @@ describe("DefaultNpmGlobalPaseoCli", () => {
     ]);
   });
 
+  test("uses the maintained source channel when configured", async () => {
+    const calls: CommandCall[] = [];
+    const previous = process.env.PASEO_CLI_UPDATE_SPEC;
+    process.env.PASEO_CLI_UPDATE_SPEC = "file:/srv/paseo-provider-fidelity.tgz";
+    try {
+      const cli = new DefaultNpmGlobalPaseoCli(async (command, args, options) => {
+        calls.push({
+          command,
+          args,
+          timeout: options?.timeout,
+          maxBuffer: options?.maxBuffer,
+        });
+        return { exitCode: 0, stdout: "changed 42 packages", stderr: "" };
+      });
+
+      await expect(cli.installLatest()).resolves.toEqual({
+        exitCode: 0,
+        stdout: "changed 42 packages",
+        stderr: "",
+      });
+      expect(calls[0]?.args).toEqual(["install", "-g", "file:/srv/paseo-provider-fidelity.tgz"]);
+    } finally {
+      if (previous === undefined) delete process.env.PASEO_CLI_UPDATE_SPEC;
+      else process.env.PASEO_CLI_UPDATE_SPEC = previous;
+    }
+  });
+
   test("reports missing npm when npm exits without JSON", async () => {
     const cli = new DefaultNpmGlobalPaseoCli(async () => ({
       exitCode: 127,

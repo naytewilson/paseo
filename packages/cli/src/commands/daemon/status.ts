@@ -82,7 +82,11 @@ async function probeDaemonStatus(
         "Supervisor exited or was replaced during status observation.",
       );
     const info = client.getLastServerInfoMessage();
-    live = { serverId: info?.serverId, daemonVersion: info?.version };
+    live = {
+      serverId: info?.serverId,
+      daemonVersion: info?.version,
+      sourceIdentity: info?.sourceIdentity,
+    };
     connectedDaemon = client.isConnected ? "reachable" : "unreachable";
     if (!status) {
       const failure = toCommandError(requestError);

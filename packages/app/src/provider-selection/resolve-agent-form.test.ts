@@ -1122,6 +1122,87 @@ describe("resolveAgentForm", () => {
       expect(next.form.thinkingOptionId).toBe("low");
     });
 
+    it("invalidates stale thinking when switching across disjoint reasoning sets", () => {
+      const disjointModels: AgentModelDefinition[] = [
+        {
+          provider: "v6",
+          id: "model-a",
+          label: "Model A",
+          isDefault: true,
+          defaultThinkingOptionId: "low",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+          ],
+        },
+        {
+          provider: "v6",
+          id: "model-b",
+          label: "Model B",
+          defaultThinkingOptionId: "xhigh",
+          thinkingOptions: [
+            { id: "high", label: "High" },
+            { id: "xhigh", label: "xhigh" },
+          ],
+        },
+      ];
+      const state = makeState(
+        { provider: "v6", model: "model-a", thinkingOptionId: "low" },
+        { thinkingOptionId: true },
+      );
+      const switched = resolveAgentForm(state, {
+        type: "SET_MODEL_FROM_USER",
+        modelId: "model-b",
+        availableModels: disjointModels,
+        providerPrefs: undefined,
+      });
+
+      expect(switched.form.model).toBe("model-b");
+      expect(switched.form.thinkingOptionId).toBe("xhigh");
+
+      const back = resolveAgentForm(
+        {
+          ...switched,
+          userModified: { ...switched.userModified, thinkingOptionId: true },
+        },
+        {
+          type: "SET_MODEL_FROM_USER",
+          modelId: "model-a",
+          availableModels: disjointModels,
+          providerPrefs: undefined,
+        },
+      );
+
+      expect(back.form.model).toBe("model-a");
+      expect(back.form.thinkingOptionId).toBe("low");
+    });
+
+    it("clears thinking when switching to a model without controllable reasoning", () => {
+      const models: AgentModelDefinition[] = [
+        {
+          provider: "v6",
+          id: "model-a",
+          label: "Model A",
+          defaultThinkingOptionId: "low",
+          thinkingOptions: [{ id: "low", label: "Low" }],
+        },
+        { provider: "v6", id: "model-c", label: "Model C" },
+      ];
+      const state = makeState(
+        { provider: "v6", model: "model-a", thinkingOptionId: "low" },
+        { thinkingOptionId: true },
+      );
+      const next = resolveAgentForm(state, {
+        type: "SET_MODEL_FROM_USER",
+        modelId: "model-c",
+        availableModels: models,
+        providerPrefs: undefined,
+      });
+
+      expect(next.form.model).toBe("model-c");
+      expect(next.form.thinkingOptionId).toBe("");
+    });
+
     it("falls back to provider default model when modelId is blank", () => {
       const state = makeState({ provider: "codex" });
       const next = resolveAgentForm(state, {

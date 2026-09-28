@@ -3517,6 +3517,9 @@ export const ServerInfoStatusPayloadSchema = z
     serverId: z.string().trim().min(1),
     hostname: ServerInfoHostnameSchema.optional(),
     version: ServerInfoVersionSchema.optional(),
+    // COMPAT(sourceIdentity): source commit for maintained builds that retain
+    // the published package version. Older clients ignore this optional field.
+    sourceIdentity: ServerInfoVersionSchema.optional(),
     // COMPAT(sessionPermissions): optional while clients support older daemons.
     permissions: z.array(DaemonPermissionSchema).optional(),
     // COMPAT(desktopManaged): added in v0.1.X, remove optional parsing after 2027-01-16.
@@ -4939,6 +4942,7 @@ export const DaemonGetStatusResponseSchema = z.object({
       requestId: z.string(),
       serverId: z.string(),
       version: z.string().nullable().optional(),
+      sourceIdentity: z.string().nullable().optional(),
       pid: z.number(),
       nodePath: z.string(),
       startedAt: z.string().nullable().optional(),

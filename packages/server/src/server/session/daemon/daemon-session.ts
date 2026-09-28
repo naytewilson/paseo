@@ -2,6 +2,7 @@ import type pino from "pino";
 import type { ProviderAvailability } from "../../agent/agent-manager.js";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
 import { getPidLockInfo } from "../../pid-lock.js";
+import { resolveSourceIdentity } from "../../source-identity.js";
 import { generateLocalPairingOffer } from "../../pairing-offer.js";
 import {
   collectDaemonDiagnostics,
@@ -185,6 +186,7 @@ export class DaemonSession {
           requestId: msg.requestId,
           serverId: this.serverId ?? "",
           version: this.daemonVersion ?? null,
+          sourceIdentity: resolveSourceIdentity(),
           pid: process.pid,
           nodePath: process.execPath,
           startedAt: pidInfo?.startedAt ?? null,
@@ -201,6 +203,7 @@ export class DaemonSession {
           requestId: msg.requestId,
           serverId: this.serverId ?? "",
           version: this.daemonVersion ?? null,
+          sourceIdentity: resolveSourceIdentity(),
           pid: process.pid,
           nodePath: process.execPath,
           startedAt: null,

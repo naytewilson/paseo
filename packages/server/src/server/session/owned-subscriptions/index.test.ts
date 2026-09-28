@@ -2,6 +2,19 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import { SessionDelivery } from "./index.js";
+import type { SessionOutboundMessage } from "../../messages.js";
+
+test("an absent reply payload is ignored without crashing the active request", async () => {
+  const delivery = new SessionDelivery(() => {});
+  const source = {};
+  delivery.attach(source, true);
+  await delivery.request(source, { type: "ping", requestId: "missing-payload" }, async () => {
+    expect(
+      delivery.reply({ type: "pong", payload: undefined } as unknown as SessionOutboundMessage),
+    ).toBe(false);
+  });
+  await delivery.close();
+});
 
 function retainedPromiseBytes(cycles: number): number {
   const fixture = fileURLToPath(new URL("./test-utils/memory-repro.ts", import.meta.url));

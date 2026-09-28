@@ -24,8 +24,10 @@ import {
   buildACPClientCapabilities,
   createLoggedNdJsonStream,
   deriveModelDefinitionsFromACP,
+  resolveACPModelThinkingOptions,
   deriveModesFromACP,
   mapACPUsage,
+  parseACPModelReasoningMeta,
   resolveACPModeSelection,
   resolveACPModelSelection,
   summarizeACPRequestError,
@@ -52,6 +54,76 @@ import type {
   ProviderRefreshContext,
 } from "../agent-sdk-types.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
+
+test("catalog effort discovery binds choices to acknowledged model selection", async () => {
+  const setSessionConfigOption = vi.fn(async ({ value }: { value: string }) => {
+    if (value === "failed") throw new Error("model unavailable");
+    return {
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          type: "select",
+          name: "Model",
+          currentValue: "b",
+          options: [],
+        },
+        {
+          id: "effort",
+          category: "thought_level",
+          type: "select",
+          name: "Effort",
+          currentValue: "high",
+          options: [
+            { value: "high", name: "High" },
+            { value: "max", name: "Max" },
+          ],
+        },
+      ],
+    };
+  });
+  const models = [
+    {
+      provider: "acp",
+      id: "a",
+      label: "A",
+      isDefault: true,
+      thinkingOptions: [{ id: "low", label: "Low", isDefault: true }],
+    },
+    { provider: "acp", id: "b", label: "B" },
+    { provider: "acp", id: "ignored", label: "Ignored selection" },
+    { provider: "acp", id: "failed", label: "Failed selection" },
+  ];
+  const result = await resolveACPModelThinkingOptions({
+    connection: { setSessionConfigOption } as unknown as ClientSideConnection,
+    sessionId: "probe",
+    models,
+    configOptions: [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        name: "Model",
+        currentValue: "a",
+        options: [],
+      },
+    ],
+    runRequest: async (request) => request(),
+    transformConfigOptions: (options) => options,
+    logger: createTestLogger(),
+    provider: "acp",
+  });
+  expect(result[0]).toEqual(models[0]);
+  expect(result[1]?.thinkingOptions?.map((option) => option.id)).toEqual(["high", "max"]);
+  expect(result[1]?.defaultThinkingOptionId).toBe("high");
+  expect(result[2]?.thinkingOptions).toBeUndefined();
+  expect(result[3]?.thinkingOptions).toBeUndefined();
+  expect(setSessionConfigOption.mock.calls.map(([request]) => request.value)).toEqual([
+    "b",
+    "ignored",
+    "failed",
+  ]);
+});
 import { buildStringCommandShellInvocation } from "../../../utils/string-command-shell.js";
 import { asInternals } from "../../test-utils/class-mocks.js";
 import * as spawnUtils from "../../../utils/spawn.js";
@@ -127,6 +199,12 @@ interface ACPConfiguredOverrideInternals {
   currentMode: string | null;
   currentModel: string | null;
   applyConfiguredOverrides(): Promise<void>;
+}
+
+interface V6SessionInternals extends ACPModelSelectionInternals {
+  currentModel: string | null;
+  thinkingOptionId: string | null;
+  defaultThinkingOptionId: string | null;
 }
 
 function createSession(
@@ -1760,8 +1838,222 @@ describe("ACPAgentSession Zed parity", () => {
   });
 });
 
+describe("ACP model + reasoning fidelity (V6)", () => {
+  test("setThinkingOption rejects unknown options without calling the provider", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.currentModel = "sonnet";
+    internals.configOptions = [selectConfigOption("thought_level", ["low", "high"], "low")];
+    const setSessionConfigOption = vi.fn(async () => ({ configOptions: [] }));
+    internals.connection = { setSessionConfigOption };
+
+    await expect(session.setThinkingOption("xhigh")).rejects.toThrow(
+      "claude-acp thinking option 'xhigh' is not available for model 'sonnet'",
+    );
+    expect(setSessionConfigOption).not.toHaveBeenCalled();
+  });
+
+  test("setThinkingOption passes a literal provider option ID 'default' through to the provider", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.currentModel = "sonnet";
+    internals.thinkingOptionId = "low";
+    internals.defaultThinkingOptionId = "low";
+    internals.configOptions = [selectConfigOption("thought_level", ["low", "default"], "low")];
+    const setSessionConfigOption = vi.fn(async () => ({ configOptions: [] }));
+    internals.connection = { setSessionConfigOption };
+
+    await session.setThinkingOption("default");
+
+    expect(setSessionConfigOption).toHaveBeenCalledWith(
+      expect.objectContaining({ value: "default" }),
+    );
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({
+      thinkingOptionId: "default",
+    });
+  });
+
+  test("setThinkingOption(null) resets an applied level to the provider default via the provider", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.currentModel = "sonnet";
+    internals.thinkingOptionId = "high";
+    internals.defaultThinkingOptionId = "low";
+    internals.configOptions = [selectConfigOption("thought_level", ["low", "high"], "high")];
+    const setSessionConfigOption = vi.fn(async () => ({ configOptions: [] }));
+    internals.connection = { setSessionConfigOption };
+
+    await session.setThinkingOption(null);
+
+    expect(setSessionConfigOption).toHaveBeenCalledWith(expect.objectContaining({ value: "low" }));
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({ thinkingOptionId: "low" });
+  });
+
+  test("setThinkingOption(null) fails visibly when no provider default is known", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.currentModel = "sonnet";
+    internals.thinkingOptionId = "high";
+    internals.defaultThinkingOptionId = null;
+    internals.configOptions = [selectConfigOption("thought_level", ["low", "high"], "high")];
+    const setSessionConfigOption = vi.fn(async () => ({ configOptions: [] }));
+    internals.connection = { setSessionConfigOption };
+
+    await expect(session.setThinkingOption(null)).rejects.toThrow(
+      "claude-acp has no known default thought level; refusing to reset",
+    );
+    expect(setSessionConfigOption).not.toHaveBeenCalled();
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({ thinkingOptionId: "high" });
+  });
+
+  test("setModel invalidates stale thinking and surfaces the provider default", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+    internals.sessionId = "session-1";
+    internals.currentModel = "sonnet";
+    internals.thinkingOptionId = "low";
+    internals.configOptions = [
+      selectConfigOption("model", ["sonnet", "opus"], "sonnet"),
+      selectConfigOption("thought_level", ["low", "medium"], "low"),
+    ];
+    internals.connection = {
+      setSessionConfigOption: vi.fn(async () => ({
+        configOptions: [
+          selectConfigOption("model", ["sonnet", "opus"], "opus"),
+          selectConfigOption("thought_level", ["high", "xhigh"], "high"),
+        ],
+      })),
+    };
+
+    await session.setModel("opus");
+    unsubscribe();
+
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({
+      model: "opus",
+      thinkingOptionId: "high",
+    });
+    expect(events).toContainEqual({
+      type: "thinking_option_changed",
+      provider: "claude-acp",
+      thinkingOptionId: "high",
+    });
+    expect(events).toContainEqual({
+      type: "model_changed",
+      provider: "claude-acp",
+      runtimeInfo: expect.objectContaining({ model: "opus", thinkingOptionId: "high" }),
+    });
+  });
+
+  test("setModel keeps still-valid thinking without emitting a thinking event", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+    internals.sessionId = "session-1";
+    internals.currentModel = "sonnet";
+    internals.thinkingOptionId = "low";
+    internals.configOptions = [
+      selectConfigOption("model", ["sonnet", "opus"], "sonnet"),
+      selectConfigOption("thought_level", ["low", "medium"], "low"),
+    ];
+    internals.connection = {
+      setSessionConfigOption: vi.fn(async () => ({
+        configOptions: [
+          selectConfigOption("model", ["sonnet", "opus"], "opus"),
+          selectConfigOption("thought_level", ["low", "medium"], "medium"),
+        ],
+      })),
+    };
+
+    await session.setModel("opus");
+    unsubscribe();
+
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({
+      model: "opus",
+      thinkingOptionId: "low",
+    });
+    expect(events.filter((event) => event.type === "thinking_option_changed")).toEqual([]);
+  });
+
+  test("runtime info exposes live thinking options for the current model", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.currentModel = "opus";
+    internals.thinkingOptionId = "xhigh";
+    internals.configOptions = [selectConfigOption("thought_level", ["high", "xhigh"], "xhigh")];
+
+    const runtimeInfo = await session.getRuntimeInfo();
+    expect(runtimeInfo).toMatchObject({
+      model: "opus",
+      thinkingOptionId: "xhigh",
+      extra: {
+        liveThinkingOptions: [
+          { id: "high", label: "high", isDefault: false },
+          { id: "xhigh", label: "xhigh", isDefault: true },
+        ],
+        liveDefaultThinkingOptionId: "xhigh",
+      },
+    });
+  });
+
+  test("runtime info omits live thinking options when reasoning is uncontrollable", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    internals.sessionId = "session-1";
+    internals.configOptions = [selectConfigOption("model", ["sonnet"], "sonnet")];
+
+    const runtimeInfo = await session.getRuntimeInfo();
+    expect(runtimeInfo.extra).not.toHaveProperty("liveThinkingOptions");
+    expect(runtimeInfo.extra).not.toHaveProperty("liveDefaultThinkingOptionId");
+  });
+
+  test("startTurn invokes the provider after the applied model and thinking", async () => {
+    const session = createSession();
+    const internals = asInternals<V6SessionInternals>(session);
+    const prompt = vi.fn(async () => ({ stopReason: "end_turn" }) as PromptResponse);
+    internals.sessionId = "session-1";
+    asInternals<ACPSessionInternals>(session).connection = { prompt };
+    internals.currentModel = "opus";
+    internals.thinkingOptionId = "xhigh";
+    internals.configOptions = [selectConfigOption("thought_level", ["high", "xhigh"], "xhigh")];
+
+    await session.startTurn("hello");
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      messageId: expect.any(String),
+      prompt: [{ type: "text", text: "hello" }],
+    });
+    await expect(session.getRuntimeInfo()).resolves.toMatchObject({
+      model: "opus",
+      thinkingOptionId: "xhigh",
+    });
+  });
+});
+
 describe("deriveModelDefinitionsFromACP", () => {
-  test("attaches shared thinking options to ACP model state", () => {
+  const thoughtLevelOption = {
+    id: "reasoning",
+    name: "Reasoning",
+    category: "thought_level",
+    type: "select",
+    currentValue: "medium",
+    options: [
+      { value: "low", name: "Low" },
+      { value: "medium", name: "Medium" },
+      { value: "high", name: "High" },
+      { value: "xhigh", name: "XHigh" },
+    ],
+  } as const;
+
+  test("attaches session thinking options only to the current model", () => {
     const result = deriveModelDefinitionsFromACP(
       "claude-acp",
       {
@@ -1771,20 +2063,7 @@ describe("deriveModelDefinitionsFromACP", () => {
         ],
         currentModelId: "haiku",
       },
-      [
-        {
-          id: "reasoning",
-          name: "Reasoning",
-          category: "thought_level",
-          type: "select",
-          currentValue: "medium",
-          options: [
-            { value: "low", name: "Low" },
-            { value: "medium", name: "Medium" },
-            { value: "high", name: "High" },
-          ],
-        },
-      ],
+      [thoughtLevelOption],
     );
 
     expect(result).toEqual([
@@ -1816,6 +2095,13 @@ describe("deriveModelDefinitionsFromACP", () => {
             isDefault: false,
             metadata: undefined,
           },
+          {
+            id: "xhigh",
+            label: "XHigh",
+            description: undefined,
+            isDefault: false,
+            metadata: undefined,
+          },
         ],
         defaultThinkingOptionId: "medium",
       },
@@ -1825,32 +2111,211 @@ describe("deriveModelDefinitionsFromACP", () => {
         label: "Sonnet",
         description: "Balanced",
         isDefault: false,
-        thinkingOptions: [
-          {
-            id: "low",
-            label: "Low",
-            description: undefined,
-            isDefault: false,
-            metadata: undefined,
-          },
-          {
-            id: "medium",
-            label: "Medium",
-            description: undefined,
-            isDefault: true,
-            metadata: undefined,
-          },
-          {
-            id: "high",
-            label: "High",
-            description: undefined,
-            isDefault: false,
-            metadata: undefined,
-          },
-        ],
-        defaultThinkingOptionId: "medium",
+        thinkingOptions: undefined,
+        defaultThinkingOptionId: undefined,
       },
     ]);
+  });
+
+  test("derives disjoint per-model reasoning sets from _meta", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [
+          {
+            modelId: "model-a",
+            name: "Model A",
+            _meta: { thoughtLevels: ["low", "medium"], defaultThoughtLevel: "low" },
+          },
+          {
+            modelId: "model-b",
+            name: "Model B",
+            _meta: { thoughtLevels: ["high", "xhigh"], defaultThoughtLevel: "xhigh" },
+          },
+          { modelId: "model-c", name: "Model C", _meta: { reasoning: false } },
+        ],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    const byId = new Map(result.map((model) => [model.id, model]));
+    expect(byId.get("model-a")?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "low",
+      "medium",
+    ]);
+    expect(byId.get("model-a")?.defaultThinkingOptionId).toBe("low");
+    expect(byId.get("model-b")?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "high",
+      "xhigh",
+    ]);
+    expect(byId.get("model-b")?.defaultThinkingOptionId).toBe("xhigh");
+    expect(byId.get("model-c")?.thinkingOptions).toBeUndefined();
+    expect(byId.get("model-c")?.defaultThinkingOptionId).toBeUndefined();
+    // Per-model contracts must not share array identity.
+    expect(byId.get("model-a")?.thinkingOptions).not.toBe(byId.get("model-b")?.thinkingOptions);
+  });
+
+  test("falls back to the session default when the declared default is outside the model set", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [
+          {
+            modelId: "model-a",
+            name: "Model A",
+            _meta: { thoughtLevels: ["low", "medium"], defaultThoughtLevel: "xhigh" },
+          },
+        ],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    expect(result[0]?.thinkingOptions?.map((option) => option.id)).toEqual(["low", "medium"]);
+    expect(result[0]?.defaultThinkingOptionId).toBe("medium");
+  });
+
+  test("V6-R1: non-current model with levels but no default keeps options and no default", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [
+          { modelId: "model-a", name: "Model A" },
+          {
+            modelId: "model-b",
+            name: "Model B",
+            _meta: { thoughtLevels: ["medium", "high"] },
+          },
+        ],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    const byId = new Map(result.map((model) => [model.id, model]));
+    // Session default (medium, model A's truth) must not leak into model B.
+    expect(byId.get("model-b")?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "medium",
+      "high",
+    ]);
+    expect(byId.get("model-b")?.defaultThinkingOptionId).toBeUndefined();
+    expect(byId.get("model-b")?.thinkingOptions?.some((option) => option.isDefault)).toBe(false);
+  });
+
+  test("V6-R1: non-current model with invalid declared default still gets no session-derived default", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [
+          { modelId: "model-a", name: "Model A" },
+          {
+            modelId: "model-b",
+            name: "Model B",
+            _meta: { thoughtLevels: ["medium", "high"], defaultThoughtLevel: "ultra" },
+          },
+        ],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    const byId = new Map(result.map((model) => [model.id, model]));
+    expect(byId.get("model-b")?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "medium",
+      "high",
+    ]);
+    expect(byId.get("model-b")?.defaultThinkingOptionId).toBeUndefined();
+    expect(byId.get("model-b")?.thinkingOptions?.some((option) => option.isDefault)).toBe(false);
+  });
+
+  test("V6-R1: current model still falls back to its session default without a metadata default", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [
+          {
+            modelId: "model-a",
+            name: "Model A",
+            _meta: { thoughtLevels: ["low", "medium"] },
+          },
+        ],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    expect(result[0]?.thinkingOptions?.map((option) => option.id)).toEqual(["low", "medium"]);
+    expect(result[0]?.defaultThinkingOptionId).toBe("medium");
+    expect(result[0]?.thinkingOptions?.find((option) => option.id === "medium")?.isDefault).toBe(
+      true,
+    );
+  });
+
+  test("treats an empty declared level set as uncontrollable reasoning", () => {
+    const result = deriveModelDefinitionsFromACP(
+      "v6-provider",
+      {
+        availableModels: [{ modelId: "model-a", name: "Model A", _meta: { thoughtLevels: [] } }],
+        currentModelId: "model-a",
+      },
+      [thoughtLevelOption],
+    );
+
+    expect(result[0]?.thinkingOptions).toBeUndefined();
+    expect(result[0]?.defaultThinkingOptionId).toBeUndefined();
+  });
+
+  test("attaches thinking options only to the default model-config fallback option", () => {
+    const result = deriveModelDefinitionsFromACP("fallback-acp", null, [
+      {
+        id: "model-option",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: "sonnet",
+        options: [
+          { value: "sonnet", name: "Sonnet" },
+          { value: "opus", name: "Opus" },
+        ],
+      },
+      thoughtLevelOption,
+    ]);
+
+    const byId = new Map(result.map((model) => [model.id, model]));
+    expect(byId.get("sonnet")?.isDefault).toBe(true);
+    expect(byId.get("sonnet")?.thinkingOptions?.map((option) => option.id)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    expect(byId.get("sonnet")?.defaultThinkingOptionId).toBe("medium");
+    expect(byId.get("opus")?.thinkingOptions).toBeUndefined();
+    expect(byId.get("opus")?.defaultThinkingOptionId).toBeUndefined();
+  });
+});
+
+describe("parseACPModelReasoningMeta", () => {
+  test("parses supported levels, defaults, and aliases", () => {
+    expect(parseACPModelReasoningMeta(null)).toEqual({
+      supported: null,
+      levels: null,
+      defaultLevel: null,
+    });
+    expect(parseACPModelReasoningMeta({ reasoning: false })).toEqual({
+      supported: false,
+      levels: null,
+      defaultLevel: null,
+    });
+    expect(
+      parseACPModelReasoningMeta({ reasoningLevels: ["high"], defaultReasoningLevel: "high" }),
+    ).toEqual({ supported: null, levels: ["high"], defaultLevel: "high" });
+    expect(
+      parseACPModelReasoningMeta({
+        thoughtLevels: [{ value: "low" }, " ", { id: "medium" }, 42],
+      }),
+    ).toEqual({ supported: null, levels: ["low", "medium"], defaultLevel: null });
   });
 });
 

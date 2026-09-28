@@ -654,6 +654,62 @@ describe("AgentStreamCoalescer", () => {
     ]);
   });
 
+  test("preserves input and output when a coalesced tool call snapshot omits them", async () => {
+    const { coalescer, flushes } = createHarness();
+    primeLeadingEdge(coalescer, flushes);
+
+    coalescer.handle(
+      "agent-1",
+      timeline({
+        type: "tool_call",
+        callId: "tool-1",
+        name: "read_file",
+        status: "running",
+        error: null,
+        detail: {
+          type: "unknown",
+          input: { file_path: "/tmp/README.md" },
+          output: { text: "first output chunk" },
+        },
+        metadata: { source: "provider", retained: true },
+      }),
+    );
+    coalescer.handle(
+      "agent-1",
+      timeline({
+        type: "tool_call",
+        callId: "tool-1",
+        name: "read_file",
+        status: "running",
+        error: null,
+        detail: {
+          type: "unknown",
+          input: undefined,
+          output: { text: "latest output chunk" },
+        },
+        metadata: { source: undefined, latest: true },
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect(flushes.map((flush) => flush.item)).toEqual([
+      {
+        type: "tool_call",
+        callId: "tool-1",
+        name: "read_file",
+        status: "running",
+        error: null,
+        detail: {
+          type: "unknown",
+          input: { file_path: "/tmp/README.md" },
+          output: { text: "latest output chunk" },
+        },
+        metadata: { source: "provider", retained: true, latest: true },
+      },
+    ]);
+  });
+
   test("coalesces interleaved tool call updates independently by callId", async () => {
     const { coalescer, flushes } = createHarness();
     primeLeadingEdge(coalescer, flushes);
