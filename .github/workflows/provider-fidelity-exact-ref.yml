@@ -10,7 +10,7 @@ permissions:
 
 env:
   ONNXRUNTIME_NODE_INSTALL: skip
-  CANDIDATE_SHA: 14ca68e60b960557965c5dd51be6279986d6e70f
+  CANDIDATE_SHA: 43880246a6d4db5bb539fe3d6f9e2211a38c3974
 
 jobs:
   validate:
@@ -43,9 +43,6 @@ jobs:
       - name: Install dependencies
         run: node scripts/npm-retry.mjs ci
 
-      - name: Build protocol prerequisite for clean-checkout gate
-        run: npm run build:protocol
-
       - name: Provider fidelity release gate
         run: npm run test:provider-fidelity
 
@@ -67,7 +64,7 @@ jobs:
       - name: Run V6 model/reasoning browser regression
         run: npm run test:e2e --workspace=@getpaseo/app -- e2e/browser/v6-model-reasoning.spec.ts
 
-      - name: Build maintained 0.9.2 CLI artifact from vendor baseline
+      - name: Build and install maintained 0.9.2 CLI artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -80,13 +77,18 @@ jobs:
           test -f "$manifest"
           sha256sum "$artifact" | tee "$RUNNER_TEMP/maintained/SHA256SUMS"
           npm install --prefix "$RUNNER_TEMP/install" "$artifact"
-          node -e '
+          CANDIDATE_SHA="$CANDIDATE_SHA" RUNNER_TEMP="$RUNNER_TEMP" node -e '
             const fs = require("node:fs");
             const path = require("node:path");
             const root = process.env.RUNNER_TEMP;
-            const pkg = JSON.parse(fs.readFileSync(path.join(root, "install/node_modules/@getpaseo/cli/package.json"), "utf8"));
+            const expected = process.env.CANDIDATE_SHA;
+            const cliRoot = path.join(root, "install/node_modules/@getpaseo/cli");
+            const pkg = JSON.parse(fs.readFileSync(path.join(cliRoot, "package.json"), "utf8"));
+            const identity = JSON.parse(fs.readFileSync(path.join(cliRoot, "source-identity.json"), "utf8"));
             if (pkg.version !== "0.9.2") throw new Error("unexpected installed CLI version: " + pkg.version);
+            if (identity.sourceCommit !== expected) throw new Error("unexpected source identity: " + identity.sourceCommit);
             console.log("installed_cli_version=" + pkg.version);
+            console.log("installed_source_identity=" + identity.sourceCommit);
           '
 
       - name: Dry-run public package contents
@@ -99,7 +101,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: provider-fidelity-exact-ref-14ca68e
+          name: provider-fidelity-exact-ref-43880246
           path: |
             ${{ runner.temp }}/maintained/
           if-no-files-found: warn
