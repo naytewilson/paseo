@@ -10,7 +10,7 @@ permissions:
 
 env:
   ONNXRUNTIME_NODE_INSTALL: skip
-  CANDIDATE_SHA: 3417374599bfd149d1c142082ba9e54f6c5a6488
+  CANDIDATE_SHA: 5c7dbb4433d5e111d10328c74c6f9638f2fefc18
 
 jobs:
   validate:
@@ -101,7 +101,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: provider-fidelity-exact-ref-34173745
+          name: provider-fidelity-exact-ref-5c7dbb44
           path: |
             ${{ runner.temp }}/maintained/
           if-no-files-found: warn
