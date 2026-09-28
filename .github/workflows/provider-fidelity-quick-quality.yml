@@ -1,0 +1,50 @@
+name: Provider Fidelity Quick Quality
+
+on:
+  push:
+    branches:
+      - validation/provider-fidelity-092-14ca68e
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: 3417374599bfd149d1c142082ba9e54f6c5a6488
+  BASE_SHA: c67b7158b441bb09026b38d86ae335cc4b49190a
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+
+      - name: Prove exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Format-check exact changed surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA...$CANDIDATE_SHA")
+          npx -y oxfmt@0.46.0 --check "${changed[@]}"
+
+      - name: Lint exact changed JS/TS surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t lintable < <(git diff --name-only "$BASE_SHA...$CANDIDATE_SHA" | grep -E '\.(js|jsx|mjs|cjs|ts|tsx)$' || true)
+          if (("${#lintable[@]}" > 0)); then
+            npx -y oxlint@1.61.0 "${lintable[@]}"
+          fi
