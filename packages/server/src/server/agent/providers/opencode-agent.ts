@@ -1602,9 +1602,19 @@ export class OpenCodeAgentClient implements AgentClient {
     config: OpenCodeAgentConfig,
     launchContext?: AgentLaunchContext,
   ): Promise<OpenCodeServerAcquisition> {
-    if (!this.bridge || requiresDedicatedOpenCodeServer(config, launchContext)) {
-      return launchContext?.env
-        ? this.serverManager.acquireDedicated(launchContext.env)
+    // Derived OpenCode providers (stepfun, pareto, ...) carry their launch env
+    // (OPENCODE_CONFIG, XDG_CONFIG_HOME, provider API keys) in the client's
+    // runtimeSettings, while launchContext.env only holds session keys
+    // (PASEO_AGENT_ID, PASEO_AGENT_CWD). Merging the provider env makes the
+    // dedicated-server decision see the full env and launches the dedicated
+    // server with it; otherwise turns reach the process-wide shared server and
+    // OpenCode reports the model under the wrong provider namespace.
+    const providerEnv = this.runtimeSettings?.env ?? {};
+    const mergedEnv = { ...providerEnv, ...launchContext?.env };
+    const effectiveLaunchContext: AgentLaunchContext = { ...launchContext, env: mergedEnv };
+    if (!this.bridge || requiresDedicatedOpenCodeServer(config, effectiveLaunchContext)) {
+      return Object.keys(mergedEnv).length > 0
+        ? this.serverManager.acquireDedicated(mergedEnv)
         : this.serverManager.acquireCurrent();
     }
     return this.serverManager.acquireCurrent();
