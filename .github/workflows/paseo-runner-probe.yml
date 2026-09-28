@@ -10,47 +10,46 @@ permissions:
 
 jobs:
   probe:
-    name: read-only authority map
+    name: read-only live Paseo snapshot
     runs-on: [self-hosted, Linux, X64, nayte-linux]
     timeout-minutes: 10
     steps:
-      - name: Map runner identity and Paseo ownership boundaries
+      - name: Observe live Dell Paseo process provenance
         shell: bash
         run: |
           set -u
-          echo "== runner =="
-          printf 'hostname=%s\n' "$(hostname)"
-          printf 'user=%s\n' "$(id -un)"
-          id || true
-          printf 'kernel=%s\n' "$(uname -srmo)"
-          printf 'home=%s\n' "$HOME"
+          echo "== host =="
+          hostname
+          id
 
-          echo "== tool reachability =="
-          for tool in paseo node npm systemctl sudo; do
-            if command -v "$tool" >/dev/null 2>&1; then
-              printf '%s=%s\n' "$tool" "$(command -v "$tool")"
-            else
-              printf '%s=NOT_FOUND\n' "$tool"
-            fi
+          echo "== Paseo processes =="
+          ps -eo user=,pid=,comm= | grep -E 'Paseo (Supervisor|Daemon)' || true
+
+          echo "== process filesystem/cgroup provenance =="
+          for pid in $(ps -eo pid=,comm= | awk '$2=="Paseo" {print $1}'); do
+            :
+          done
+          for pid in $(ps -eo user=,pid=,comm= | awk '$1=="nayte" && ($3=="Paseo" || $3=="Paseo Supervisor" || $3=="Paseo Daemon") {print $2}'); do
+            echo "-- pid=$pid --"
+            printf 'exe='; readlink "/proc/$pid/exe" 2>&1 || true
+            printf 'cwd='; readlink "/proc/$pid/cwd" 2>&1 || true
+            printf 'cgroup='; tr '\n' ';' < "/proc/$pid/cgroup" 2>/dev/null || true; echo
           done
 
-          echo "== home-backed identities =="
-          getent passwd | awk -F: '$6 ~ /^\/home\// {print $1 ":" $6}' | sort || true
-
-          echo "== Paseo service file locations visible to runner =="
-          find /etc/systemd /home -maxdepth 6 -type f \( -name 'paseo.service' -o -name '*paseo*.service' \) -print 2>/dev/null | sort || true
-
-          echo "== system-scoped Paseo units =="
-          systemctl --no-pager --all --type=service 2>/dev/null | grep -i paseo || true
-
-          echo "== Paseo-ish process owners/names =="
-          ps -eo user=,pid=,comm= | grep -Ei 'paseo|node|npm' | head -100 || true
-
-          echo "== noninteractive sudo authority =="
-          sudo -n -l 2>&1 || true
-
-          echo "== user-bus probes =="
-          getent passwd | awk -F: '$6 ~ /^\/home\// {print $1}' | while read -r candidate; do
-            echo "-- user=$candidate --"
-            systemctl --machine="$candidate@.host" --user show paseo.service --no-pager               -p ActiveState -p SubState -p UnitFileState -p FragmentPath -p DropInPaths 2>&1 || true
+          echo "== cgroup matches for live Paseo pids =="
+          for pid in $(pgrep -u nayte -f 'Paseo' 2>/dev/null || true); do
+            comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
+            case "$comm" in
+              *Paseo*)
+                printf 'pid=%s comm=%s cgroup=' "$pid" "$comm"
+                tr '\n' ';' < "/proc/$pid/cgroup" 2>/dev/null || true
+                echo
+                ;;
+            esac
           done
+
+          echo "== user manager metadata =="
+          loginctl show-user nayte -p UID -p State -p Linger -p RuntimePath 2>&1 || true
+
+          echo "== listening TCP sockets (no process argv) =="
+          ss -ltn 2>/dev/null || true
