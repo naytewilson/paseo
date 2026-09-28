@@ -30,8 +30,13 @@ jobs:
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test -z "$(git status --porcelain)"
 
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
+      - name: Prove lockfile and install with isolated modern npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f package-lock.json
+          test "$(git hash-object package-lock.json)" = "76664bdce86717ebccf78017b1863233bc4f70f7"
+          npx -y npm@10.9.3 ci
 
       - name: Build server and CLI stack
         run: npm run build:server
