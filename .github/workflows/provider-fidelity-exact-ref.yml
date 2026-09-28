@@ -43,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: node scripts/npm-retry.mjs ci
 
+      - name: Build protocol prerequisite for clean-checkout gate
+        run: npm run build:protocol
+
       - name: Provider fidelity release gate
         run: npm run test:provider-fidelity
 
