@@ -44,7 +44,30 @@ const baselinePackage = JSON.parse(readFileSync(path.join(baseline, "package.jso
 if (baselinePackage.name !== "@getpaseo/cli" || baselinePackage.version !== version) {
   throw new Error("Baseline CLI name/version does not match the candidate");
 }
-cpSync(path.join(baseline, "node_modules"), path.join(stage, "node_modules"), { recursive: true });
+// The baseline is an npm-installed copy of @getpaseo/cli. npm 7+ hoists the
+// baseline's dependencies to the install prefix, so <baseline>/node_modules
+// usually does not exist. Resolve the dependency tree the way Node resolves
+// modules: walk up from the baseline to the nearest node_modules directory.
+function resolveBaselineNodeModules(baselineDir) {
+  let dir = path.resolve(baselineDir);
+  for (;;) {
+    const candidate = path.join(dir, "node_modules");
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) throw new Error(`No node_modules found above baseline ${baselineDir}`);
+    dir = parent;
+  }
+}
+const baselineNodeModules = resolveBaselineNodeModules(baseline);
+mkdirSync(path.join(stage, "node_modules"), { recursive: true });
+for (const entry of readdirSync(baselineNodeModules)) {
+  // Internal @getpaseo packages are rebuilt from the source tree below; never
+  // copy the baseline's own CLI copy or other scoped packages from the prefix.
+  if (entry === "@getpaseo") continue;
+  cpSync(path.join(baselineNodeModules, entry), path.join(stage, "node_modules", entry), {
+    recursive: true,
+  });
+}
 const files = {};
 const hash = (filename) => createHash("sha256").update(readFileSync(filename)).digest("hex");
 function copy(relative, destination) {
