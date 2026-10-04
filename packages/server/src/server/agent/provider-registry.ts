@@ -219,6 +219,10 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
     new OpenCodeAgentClient(logger, runtimeSettings, {
       managedProcesses: options?.managedProcesses,
       bridge: options?.openCodeBridge,
+      // Derived providers (stepfun, pareto, ...) register under their own
+      // namespace in their OpenCode config; the client needs the id so bare
+      // model ids resolve against it instead of "opencode".
+      providerId: options?.customProvider?.id,
     }),
   pi: (logger, runtimeSettings, options) =>
     new PiRpcAgentClient({
