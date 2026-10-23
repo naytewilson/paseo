@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { constants, existsSync } from "node:fs";
+import { access, stat } from "node:fs/promises";
 import { execCommand } from "../utils/spawn.js";
 import { isWindowsCommandScript } from "../utils/windows-command.js";
 import { windowsExecutableResolution } from "./windows.js";
@@ -59,10 +60,28 @@ async function enumerateCandidatesViaLibrary(name: string): Promise<string[]> {
   });
 }
 
+async function probePosixExecutable(executablePath: string): Promise<boolean> {
+  try {
+    const metadata = await stat(executablePath);
+    if (!metadata.isFile()) return false;
+    await access(executablePath, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function probeExecutable(
   executablePath: string,
   timeoutMs = PROBE_TIMEOUT_MS,
 ): Promise<boolean> {
+  // POSIX availability is a filesystem property. Executing provider
+  // `--version` commands here creates real provider processes during snapshot
+  // fan-out and can strand descendants when a timed-out probe is killed.
+  if (process.platform !== "win32") {
+    return probePosixExecutable(executablePath);
+  }
+
   try {
     await execCommand(executablePath, ["--version"], {
       timeout: timeoutMs,

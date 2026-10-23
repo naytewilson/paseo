@@ -1,6 +1,6 @@
 // POSIX-only: POSIX PATH executable probing fixtures
 /* eslint-disable max-nested-callbacks */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -60,12 +60,16 @@ describe.skipIf(isPlatform("win32"))("provider-availability POSIX-only", () => {
     await expect(client.isAvailable()).resolves.toBe(true);
   });
 
-  test("OpenCode reports available when the default command resolves from PATH", async () => {
+  test("OpenCode availability does not execute the provider binary", async () => {
     const binDir = makeTempDir("provider-availability-opencode-");
     isolatePathTo(binDir);
-    writeProviderShim(binDir, "opencode");
+    const markerPath = join(binDir, "opencode-was-executed");
+    const executablePath = writeProviderShim(binDir, "opencode");
+    writeFileSync(executablePath, `#!/bin/sh\ntouch "${markerPath}"\necho opencode 1.0\n`);
+    chmodSync(executablePath, 0o755);
     const client = new OpenCodeAgentClient(createTestLogger());
 
     await expect(client.isAvailable()).resolves.toBe(true);
+    expect(existsSync(markerPath)).toBe(false);
   });
 });
