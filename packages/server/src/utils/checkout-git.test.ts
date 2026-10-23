@@ -1512,6 +1512,34 @@ const x = 1;
     expect(metrics.maxConcurrent).toBeLessThanOrEqual(8);
   });
 
+  it("batches small tracked diffs and preserves Git patch output", async () => {
+    const paths = Array.from({ length: 24 }, (_, index) => `batch-${String(index).padStart(2, "0")}.txt`);
+    for (const path of paths) {
+      writeFileSync(join(repoDir, path), `before ${path}\n`);
+    }
+    execFileSync("git", ["add", "."], { cwd: repoDir });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "add batch files"], {
+      cwd: repoDir,
+    });
+
+    for (const path of paths) {
+      writeFileSync(join(repoDir, path), `after ${path}\n`);
+    }
+    const expected = execFileSync("git", ["diff", "HEAD"], { cwd: repoDir }).toString();
+
+    startGitCommandMetrics();
+    const diff = await getCheckoutDiff(repoDir, { mode: "uncommitted" });
+    const metrics = stopGitCommandMetrics();
+    const diffCommands = metrics.commands
+      .map((command) => command.args.join(" "))
+      .filter((command) => command.startsWith("diff HEAD -- "));
+
+    expect(diff.diff).toBe(expected);
+    expect(diffCommands).toHaveLength(1);
+    expect(diffCommands[0]).toContain("batch-00.txt");
+    expect(diffCommands[0]).toContain("batch-23.txt");
+  });
+
   it("marks tracked files omitted by the total diff budget as too_large", async () => {
     for (let i = 1; i <= 4; i += 1) {
       writeFileSync(join(repoDir, `budget-${i}.txt`), "old\n");

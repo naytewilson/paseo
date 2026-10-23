@@ -197,6 +197,17 @@ function resolveWorkerExecArgv(): string[] {
     'import { pathToFileURL } from "node:url";',
     `register(${JSON.stringify(loaderUrl)}, pathToFileURL("./"));`,
   ].join(" ");
+  // Some Node 22 distributions expose the flag but are built without the
+  // embedded TypeScript runtime (`process.features.typescript === false`).
+  // Use the repository's tsx loader in that environment; otherwise every
+  // plugin child dies before IPC starts with ERR_NO_TYPESCRIPT.
+  const nativeTypeScript = (process.features as { typescript?: boolean }).typescript === true;
+  if (!nativeTypeScript) {
+    // tsx owns both the .ts load hook and extension remapping. Registering the
+    // native-only resolver in front of it would short-circuit tsx's loader and
+    // leave direct .ts imports with ERR_UNKNOWN_FILE_EXTENSION.
+    return ["--import", "tsx"];
+  }
   return [
     "--experimental-strip-types",
     "--import",
