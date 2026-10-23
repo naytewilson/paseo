@@ -346,6 +346,12 @@ function resolveOpenCodePermissionReply(
 type OpenCodeAgentConfig = Omit<AgentSessionConfig, "providerOptions"> & {
   provider: "opencode";
   providerOptions: OpenCodeProviderOptions;
+  /**
+   * The OpenCode provider namespace bare model ids resolve against.
+   * "opencode" for the base provider; the derived provider id (e.g. "stepfun",
+   * "pareto") for derived providers, matching their OpenCode config.
+   */
+  providerNamespace?: string;
 };
 
 const OPENCODE_SESSION_ENV_KEYS = new Set(["PASEO_AGENT_ID", "PASEO_AGENT_CWD"]);
@@ -1382,6 +1388,14 @@ interface OpenCodeAgentClientDeps {
   resolveHomeDir?: () => string;
   managedProcesses?: ManagedProcessRegistry;
   bridge?: OpenCodeBridge;
+  /**
+   * The Paseo provider id this client serves (e.g. "stepfun" for a derived
+   * OpenCode provider). Derived providers register under their own namespace
+   * in their dedicated OpenCode config, so bare model ids must resolve
+   * against it instead of the "opencode" default. Undefined for the base
+   * opencode provider.
+   */
+  providerId?: string;
 }
 
 type OpenCodeClientFactory = (options: { baseUrl: string; directory: string }) => OpencodeClient;
@@ -1403,6 +1417,7 @@ export class OpenCodeAgentClient implements AgentClient {
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly modelContextWindows = new Map<string, number>();
   private readonly bridge?: OpenCodeBridge;
+  private readonly providerNamespace: string;
 
   constructor(
     logger: Logger,
@@ -1416,6 +1431,7 @@ export class OpenCodeAgentClient implements AgentClient {
       ...(this.bridge ? { supportsNativePaseoTools: true } : {}),
     };
     this.runtimeSettings = runtimeSettings;
+    this.providerNamespace = deps.providerId ?? "opencode";
     this.createOpenCodeClient = deps.createClient ?? createSdkOpenCodeClient;
     this.serverManager =
       deps.serverManager ??
@@ -1551,9 +1567,19 @@ export class OpenCodeAgentClient implements AgentClient {
     config: OpenCodeAgentConfig,
     launchContext?: AgentLaunchContext,
   ): Promise<OpenCodeServerAcquisition> {
-    if (!this.bridge || requiresDedicatedOpenCodeServer(config, launchContext)) {
-      return launchContext?.env
-        ? this.serverManager.acquireDedicated(launchContext.env)
+    // Derived OpenCode providers (stepfun, pareto, ...) carry their launch env
+    // (OPENCODE_CONFIG, XDG_CONFIG_HOME, provider API keys) in the client's
+    // runtimeSettings, while launchContext.env only holds session keys
+    // (PASEO_AGENT_ID, PASEO_AGENT_CWD). Merging the provider env makes the
+    // dedicated-server decision see the full env and launches the dedicated
+    // server with it; otherwise turns reach the process-wide shared server and
+    // OpenCode reports the model under the wrong provider namespace.
+    const providerEnv = this.runtimeSettings?.env ?? {};
+    const mergedEnv = { ...providerEnv, ...launchContext?.env };
+    const effectiveLaunchContext: AgentLaunchContext = { ...launchContext, env: mergedEnv };
+    if (!this.bridge || requiresDedicatedOpenCodeServer(config, effectiveLaunchContext)) {
+      return Object.keys(mergedEnv).length > 0
+        ? this.serverManager.acquireDedicated(mergedEnv)
         : this.serverManager.acquireCurrent();
     }
     return this.serverManager.acquireCurrent();
@@ -1880,7 +1906,12 @@ export class OpenCodeAgentClient implements AgentClient {
       throw new Error(`OpenCodeAgentClient received config for provider '${config.provider}'`);
     }
     const providerOptions = OpenCodeProviderOptionsSchema.parse(config.providerOptions ?? {});
-    return normalizeOpenCodeConfig({ ...config, provider: "opencode", providerOptions });
+    return normalizeOpenCodeConfig({
+      ...config,
+      provider: "opencode",
+      providerOptions,
+      providerNamespace: this.providerNamespace,
+    });
   }
 
   private async populateModelContextWindowCache(
@@ -4980,7 +5011,11 @@ class OpenCodeAgentSession implements AgentSession {
     if (parts.length >= 2) {
       return { providerID: parts[0], modelID: parts.slice(1).join("/") };
     }
-    return { providerID: "opencode", modelID: model };
+    // Bare model ids resolve against this session's provider namespace:
+    // "opencode" for the base provider, the derived provider id (e.g. "stepfun",
+    // "pareto") for derived providers, matching the namespace in their
+    // OpenCode config.
+    return { providerID: this.config.providerNamespace ?? "opencode", modelID: model };
   }
 
   private async ensureMcpServersConfigured(): Promise<void> {
