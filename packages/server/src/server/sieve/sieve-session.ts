@@ -38,6 +38,7 @@ export class SieveSession {
   private readonly logger: pino.Logger;
   private readonly now: () => string;
   private readonly subscriptions = new Map<string, SieveLensFeed>();
+  private disposed = false;
 
   constructor(options: SieveSessionOptions) {
     this.host = options.host;
@@ -58,6 +59,9 @@ export class SieveSession {
   }
 
   async handleStatusSubscribeRequest(msg: SieveStatusSubscribeRequest): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     const feed = this.feed;
     if (!feed) {
       this.host.emit({
@@ -116,6 +120,14 @@ export class SieveSession {
       });
       return;
     }
+    if (this.disposed) {
+      // The session was torn down while subscribe was in flight. Release the
+      // membership the feed just granted instead of holding it for a dead host.
+      await feed.unsubscribe(subscription.subscriptionId).catch((error: unknown) => {
+        this.logger.warn({ err: error }, "SIEVE feed unsubscribe failed after dispose");
+      });
+      return;
+    }
     this.subscriptions.set(subscription.subscriptionId, feed);
     // Membership exists from here on — the response must report it even when
     // the status read fails, or the daemon would hold a subscription the
@@ -130,6 +142,12 @@ export class SieveSession {
         reason: "feed_unreachable",
         detail: error instanceof Error ? error.message : String(error),
       };
+    }
+    // dispose() may have won while getStatus() was pending. In that case it
+    // already drained/unsubscribed the registered membership, so never publish
+    // an accepted subscription that no longer exists.
+    if (this.disposed) {
+      return;
     }
     this.host.emit({
       type: "sieve.status.subscribe.response",
@@ -168,6 +186,7 @@ export class SieveSession {
 
   /** Release every feed subscription this session holds. */
   async dispose(): Promise<void> {
+    this.disposed = true;
     const pending = [...this.subscriptions.entries()];
     this.subscriptions.clear();
     await Promise.all(
