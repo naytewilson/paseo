@@ -16,6 +16,7 @@ type Observer = (snapshot: CreationSnapshot) => void;
 export interface CreatedAgent {
   agent: AgentSnapshotPayload;
   initialPromptStarted: boolean;
+  initialTurnId?: string | null;
 }
 interface CreationRequest {
   key: string;
@@ -24,6 +25,8 @@ interface CreationRequest {
   agentId?: string;
   hasAgent: boolean;
   hasPrompt: boolean;
+  /** A provider Create attempt may have taken effect even when no agent row was committed. */
+  ambiguousAgentCreateFailure?: boolean;
   exists: (kind: "workspace" | "agent", id: string) => Promise<boolean>;
   provision?: (
     workspaceId: string,
@@ -43,8 +46,16 @@ const RecordSchema = z.object({
   fingerprint: z.string(),
   snapshot: CreationSnapshotSchema,
   inFlight: z.enum(["workspace", "agent", "prompt"]).nullable(),
+  initialTurnId: z.string().nullable().optional(),
 });
 type Record = z.infer<typeof RecordSchema>;
+
+export interface CreationLookup {
+  snapshot: CreationSnapshot;
+  inFlight: Record["inFlight"];
+  active: boolean;
+  initialTurnId: string | null;
+}
 
 /** Owns creation across socket lifetimes. Resource owners perform work; this module commits its milestones. */
 export class CreationService {
@@ -148,73 +159,127 @@ export class CreationService {
     }
   }
 
+  async lookup(kind: CreationSnapshot["kind"], key: string): Promise<CreationLookup | null> {
+    const identity = identityFor(kind, key);
+    await this.admission;
+    let record = await this.read(identity);
+    if (!record) return null;
+
+    if (record.inFlight && !this.active.has(identity)) {
+      await this.publish(identity, record, {
+        phase: "failed",
+        failedStage: record.inFlight,
+        outcomeUnknown: true,
+        error: `${kind}_request_outcome_unknown`,
+      });
+      record = await this.read(identity);
+      if (!record) return null;
+    }
+
+    if (record.snapshot.phase === "completed") {
+      await this.validateCompleted(record.snapshot);
+    }
+    return {
+      snapshot: record.snapshot,
+      inFlight: record.inFlight,
+      active: this.active.has(identity),
+      initialTurnId: record.initialTurnId ?? null,
+    };
+  }
+
   private async run(
     identity: string,
     record: Record,
     input: CreationInput,
   ): Promise<CreationSnapshot> {
     try {
-      if (input.provision && !record.snapshot.workspace) {
-        record.inFlight = "workspace";
-        await this.write(identity, record);
-        const { workspace, setupSkippedReason } = await input.provision(
-          record.snapshot.workspaceId!,
-        );
-        record.inFlight = null;
-        await this.publish(identity, record, {
-          phase: "workspace_ready",
-          workspace,
-          workspaceId: workspace.id,
-          setupSkippedReason,
-        });
-      }
-      if (input.hasAgent && input.createAgent && !record.snapshot.agent) {
-        record.inFlight = "agent";
-        await this.write(identity, record);
-        const { agent, initialPromptStarted } = await input.createAgent(
-          record.snapshot.agentId!,
-          record.snapshot.workspace,
-          async (readyAgent) => {
-            record.inFlight = input.hasPrompt ? "prompt" : null;
-            await this.publish(identity, record, {
-              phase: "agent_ready",
-              agent: readyAgent,
-              workspaceId: readyAgent.workspaceId ?? record.snapshot.workspaceId,
-            });
-          },
-        );
-        record.inFlight = null;
-        if (initialPromptStarted)
-          await this.publish(identity, record, { phase: "prompt_started", agent });
-        else record.snapshot = { ...record.snapshot, agent };
-      }
+      if (input.provision && !record.snapshot.workspace)
+        await this.createWorkspace(identity, record, input);
+      if (input.hasAgent && input.createAgent && !record.snapshot.agent)
+        await this.createAgent(identity, record, input);
       record.inFlight = null;
       await this.publish(identity, record, { phase: "completed" });
     } catch (error) {
-      const stage = record.inFlight ?? "agent";
-      const resourceId =
-        stage === "workspace" ? record.snapshot.workspaceId : record.snapshot.agentId;
-      const code =
-        error instanceof Error && "code" in error && typeof error.code === "string"
-          ? error.code
-          : undefined;
-      const rejectedBeforeProvision = code === "directory_not_found" || code === "source_required";
-      const unknown =
-        stage === "prompt" ||
-        (stage === "workspace" && !rejectedBeforeProvision) ||
-        (resourceId !== null && (await input.exists(stage, resourceId)));
-      // A failed provider startup with no registered resource can retry under the same ID.
-      // A partially provisioned resource or an attempted prompt needs reconciliation.
-      if (!unknown) record.inFlight = null;
-      await this.publish(identity, record, {
-        phase: "failed",
-        error: error instanceof Error ? error.message : String(error),
-        errorCode: code,
-        failedStage: stage,
-        outcomeUnknown: unknown,
-      });
+      await this.publishFailure(identity, record, input, error);
     }
     return record.snapshot;
+  }
+
+  private async createWorkspace(
+    identity: string,
+    record: Record,
+    input: CreationInput,
+  ): Promise<void> {
+    if (!input.provision) return;
+    record.inFlight = "workspace";
+    await this.write(identity, record);
+    const { workspace, setupSkippedReason } = await input.provision(record.snapshot.workspaceId!);
+    record.inFlight = null;
+    await this.publish(identity, record, {
+      phase: "workspace_ready",
+      workspace,
+      workspaceId: workspace.id,
+      setupSkippedReason,
+    });
+  }
+
+  private async createAgent(identity: string, record: Record, input: CreationInput): Promise<void> {
+    if (!input.createAgent) return;
+    record.inFlight = "agent";
+    await this.write(identity, record);
+    const { agent, initialPromptStarted, initialTurnId } = await input.createAgent(
+      record.snapshot.agentId!,
+      record.snapshot.workspace,
+      async (readyAgent) => {
+        record.inFlight = input.hasPrompt ? "prompt" : null;
+        await this.publish(identity, record, {
+          phase: "agent_ready",
+          agent: readyAgent,
+          workspaceId: readyAgent.workspaceId ?? record.snapshot.workspaceId,
+        });
+      },
+    );
+    record.inFlight = null;
+    record.initialTurnId = initialTurnId ?? null;
+    if (initialPromptStarted) {
+      await this.publish(identity, record, { phase: "prompt_started", agent });
+    } else {
+      record.snapshot = { ...record.snapshot, agent };
+    }
+  }
+
+  private async publishFailure(
+    identity: string,
+    record: Record,
+    input: CreationInput,
+    error: unknown,
+  ): Promise<void> {
+    const stage = record.inFlight ?? "agent";
+    const resourceId =
+      stage === "workspace" ? record.snapshot.workspaceId : record.snapshot.agentId;
+    const code =
+      error instanceof Error && "code" in error && typeof error.code === "string"
+        ? error.code
+        : undefined;
+    const rejectedBeforeProvision = code === "directory_not_found" || code === "source_required";
+    const ambiguousCreate = input.ambiguousAgentCreateFailure && stage === "agent";
+    const unknown =
+      stage === "prompt" ||
+      ambiguousCreate ||
+      (stage === "workspace" && !rejectedBeforeProvision) ||
+      (resourceId !== null && (await input.exists(stage, resourceId)));
+    // A failed provider startup with no registered resource can retry under the same ID.
+    // A partially provisioned resource or an attempted prompt needs reconciliation.
+    if (!unknown) record.inFlight = null;
+    let publicError = error instanceof Error ? error.message : String(error);
+    if (ambiguousCreate) publicError = "agent_create_outcome_unknown";
+    await this.publish(identity, record, {
+      phase: "failed",
+      error: publicError,
+      errorCode: code,
+      failedStage: stage,
+      outcomeUnknown: unknown,
+    });
   }
 
   // COMPAT(agentRequestReceipts): added in v0.8.0, remove after 2027-03-11 once old creation receipts can expire.

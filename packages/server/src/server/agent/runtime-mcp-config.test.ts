@@ -14,28 +14,35 @@ describe("withRuntimePaseoMcpServer", () => {
       config: BASE_CONFIG,
       agentId: "agent-1",
       mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
-      mcpAuthToken: "cap-token",
+      agentMcpCapability: {
+        token: "agent-token",
+        scope: {
+          serverId: "srv_local",
+          daemonGeneration: "daemon-generation",
+          generation: "session-generation",
+          agentId: "agent-1",
+          workspaceId: "wks-1",
+          scope: "agent_mcp_parent_v1",
+        },
+      },
     });
 
     expect(result.mcpServers?.paseo).toEqual({
       type: "http",
       url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
-      headers: { Authorization: "Bearer cap-token" },
+      headers: { Authorization: "Bearer agent-token" },
     });
   });
 
-  test("omits the header when no token is available", () => {
+  test("does not inject an agent-scoped URL when no per-agent capability is available", () => {
     const result = withRuntimePaseoMcpServer({
       config: BASE_CONFIG,
       agentId: "agent-1",
       mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
-      mcpAuthToken: null,
+      agentMcpCapability: null,
     });
 
-    expect(result.mcpServers?.paseo).toEqual({
-      type: "http",
-      url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=agent-1",
-    });
+    expect(result.mcpServers?.paseo).toBeUndefined();
   });
 
   test("does not inject when no MCP base URL is configured", () => {
@@ -43,7 +50,7 @@ describe("withRuntimePaseoMcpServer", () => {
       config: BASE_CONFIG,
       agentId: "agent-1",
       mcpBaseUrl: null,
-      mcpAuthToken: "cap-token",
+      agentMcpCapability: null,
     });
 
     expect(result.mcpServers).toBeUndefined();

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { experimental_createMCPClient } from "ai";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import pino from "pino";
@@ -11,7 +11,10 @@ import pino from "pino";
 import { withTimeout } from "../../utils/promise-timeout.js";
 import { hashDaemonPassword } from "../auth.js";
 import { createPaseoDaemon, type PaseoDaemonConfig } from "../bootstrap.js";
-import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
+import {
+  createTestAgentClients,
+  type TestAgentClientOptions,
+} from "../test-utils/fake-agent-client.js";
 import type {
   AgentClient,
   AgentPersistenceHandle,
@@ -87,6 +90,35 @@ async function createMcpClient(url: string, authToken?: string): Promise<McpClie
   const rawClient = await experimental_createMCPClient({ transport });
   const boundCallTool: McpClient["callTool"] = Reflect.get(rawClient, "callTool").bind(rawClient);
   return { callTool: boundCallTool, close: () => rawClient.close() };
+}
+
+async function archiveParentAndAssertNoScopedCreate(options: {
+  rootClient: McpClient;
+  scopedClient: McpClient;
+  parentId: string;
+  workspaceId: string | undefined;
+  launchCount: () => number;
+}): Promise<void> {
+  await options.rootClient.callTool({
+    name: "archive_agent",
+    args: { agentId: options.parentId },
+  });
+  const before = options.launchCount();
+  const denied = await options.scopedClient
+    .callTool({
+      name: "create_agent",
+      args: {
+        operationKey: "archived-parent-must-not-create",
+        workspaceId: options.workspaceId,
+        title: "Must not start",
+        provider: "claude/claude-test-model",
+        settings: { thinkingOptionId: "high" },
+        initialPrompt: "Must not reach provider Create",
+      },
+    })
+    .catch(() => null);
+  expect(denied?.isError ?? true).toBe(true);
+  expect(options.launchCount()).toBe(before);
 }
 
 interface OfflineMcpDaemon {
@@ -202,8 +234,11 @@ class RecordingAgentClient implements AgentClient {
   }
 }
 
-function createMcpRecordingAgentClients(recorder: LaunchRecorder) {
-  const clients = createTestAgentClients();
+function createMcpRecordingAgentClients(
+  recorder: LaunchRecorder,
+  options: TestAgentClientOptions = {},
+) {
+  const clients = createTestAgentClients(options);
   const claude = clients.claude;
   if (!claude) {
     throw new Error("Fake Claude client is not configured");
@@ -300,6 +335,155 @@ describe("agent MCP end-to-end (offline)", () => {
     }
   }, 30_000);
 
+  test("agent-scoped operation keys replay, lookup, and notify the authenticated parent", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-home-agent-operation-"));
+    const staticDir = await mkdtemp(path.join(os.tmpdir(), "paseo-static-agent-operation-"));
+    const parentCwd = await mkdtemp(path.join(os.tmpdir(), "paseo-agent-operation-parent-"));
+    const port = await getAvailablePort();
+    const recorder: LaunchRecorder = { recordedLaunches: [] };
+    const parentNotifications: string[] = [];
+    const daemon = await createPaseoDaemon(
+      {
+        listen: `127.0.0.1:${port}`,
+        paseoHome,
+        corsAllowedOrigins: [],
+        hostnames: true,
+        mcpEnabled: true,
+        staticDir,
+        mcpDebug: false,
+        agentClients: createMcpRecordingAgentClients(recorder, {
+          onStartTurn: (prompt, config) => {
+            if (config.title === "Operation parent") {
+              parentNotifications.push(
+                typeof prompt === "string" ? prompt : JSON.stringify(prompt),
+              );
+            }
+          },
+        }),
+        agentStoragePath: path.join(paseoHome, "agents"),
+      },
+      pino({ level: "silent" }),
+    );
+    await daemon.start();
+
+    const mcpUrl = `http://127.0.0.1:${port}/mcp/agents`;
+    const rootClient = await createMcpClient(mcpUrl);
+    let scopedClient: McpClient | null = null;
+    const createdAgentIds: string[] = [];
+    try {
+      const parentResult = await rootClient.callTool({
+        name: "create_agent",
+        args: {
+          cwd: parentCwd,
+          title: "Operation parent",
+          provider: "claude/claude-test-model",
+          mode: "bypassPermissions",
+          initialPrompt: "Parent session setup",
+        },
+      });
+      const parentId = getStructuredContent(parentResult)?.agentId;
+      expect(typeof parentId).toBe("string");
+      createdAgentIds.push(parentId as string);
+
+      const parentScope = daemon.agentManager.getAgent(parentId as string);
+      expect(parentScope?.workspaceId).toBeTruthy();
+      const mcpConfig = recorder.recordedLaunches.at(-1)?.mcpServers?.paseo;
+      expect(mcpConfig?.type).toBe("http");
+      const authorization = mcpConfig?.headers?.Authorization;
+      expect(authorization).toBeTruthy();
+      scopedClient = await createMcpClient(
+        mcpConfig!.url,
+        authorization!.replace(/^Bearer\s+/, ""),
+      );
+
+      const scopeResult = await scopedClient.callTool({ name: "get_agent_mcp_scope", args: {} });
+      const scope = getStructuredContent(scopeResult);
+      expect(scopeResult.isError).not.toBe(true);
+      expect(scope).toMatchObject({
+        serverId: daemon.getServerId(),
+        agentId: parentId,
+        workspaceId: parentScope?.workspaceId,
+        scope: "agent_mcp_parent_v1",
+      });
+
+      const createArgs = {
+        operationKey: "run-luna-high-01",
+        workspaceId: parentScope?.workspaceId,
+        title: "Keyed child",
+        provider: "claude/claude-test-model",
+        settings: { thinkingOptionId: "high" },
+        initialPrompt: "reply with done and stop",
+        notifyOnFinish: true,
+      };
+      const initialLaunchCount = recorder.recordedLaunches.length;
+      const childResult = await scopedClient.callTool({ name: "create_agent", args: createArgs });
+      const childId = getStructuredContent(childResult)?.agentId;
+      expect(childResult.isError).not.toBe(true);
+      expect(typeof childId).toBe("string");
+      createdAgentIds.push(childId as string);
+
+      const childRecord = await daemon.agentStorage.get(childId as string);
+      expect(childRecord?.labels).toMatchObject({
+        "paseo.parent-agent-id": parentId,
+        "paseo.parent-server-id": daemon.getServerId(),
+      });
+      expect(childRecord?.workspaceId).toBe(parentScope?.workspaceId);
+      expect(recorder.recordedLaunches).toHaveLength(initialLaunchCount + 1);
+
+      const replay = await scopedClient.callTool({ name: "create_agent", args: createArgs });
+      expect(replay.isError).not.toBe(true);
+      expect(getStructuredContent(replay)?.agentId).toBe(childId);
+      expect(recorder.recordedLaunches).toHaveLength(initialLaunchCount + 1);
+
+      const lookup = await scopedClient.callTool({
+        name: "get_agent_by_operation",
+        args: { operationKey: createArgs.operationKey },
+      });
+      expect(getStructuredContent(lookup)).toMatchObject({ status: "created", agentId: childId });
+
+      const changedIntent = await scopedClient.callTool({
+        name: "create_agent",
+        args: { ...createArgs, initialPrompt: "different immutable intent" },
+      });
+      expect(changedIntent.isError).toBe(true);
+      expect(recorder.recordedLaunches).toHaveLength(initialLaunchCount + 1);
+
+      await vi.waitFor(
+        () => {
+          expect(parentNotifications.join("\n").toLowerCase().includes("finished")).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
+      const stopFinishedOperation = await scopedClient.callTool({
+        name: "cancel_agent_by_operation",
+        args: { operationKey: createArgs.operationKey },
+      });
+      expect(getStructuredContent(stopFinishedOperation)).toMatchObject({
+        status: "turn_mismatch",
+        cancelAcknowledged: false,
+      });
+      expect(daemon.agentManager.getAgent(childId as string)?.lifecycle).toBe("idle");
+
+      await archiveParentAndAssertNoScopedCreate({
+        rootClient,
+        scopedClient,
+        parentId: parentId as string,
+        workspaceId: parentScope?.workspaceId,
+        launchCount: () => recorder.recordedLaunches.length,
+      });
+    } finally {
+      for (const agentId of createdAgentIds) {
+        await rootClient.callTool({ name: "kill_agent", args: { agentId } }).catch(() => undefined);
+      }
+      await scopedClient?.close();
+      await rootClient.close();
+      await daemon.stop();
+      await rm(paseoHome, { recursive: true, force: true });
+      await rm(staticDir, { recursive: true, force: true });
+      await rm(parentCwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("create_workspace with local isolation adopts only an existing directory", async () => {
     const daemon = await startOfflineMcpDaemon();
     const root = await mkdtemp(path.join(os.tmpdir(), "paseo-local-workspace-"));
@@ -387,6 +571,273 @@ describe("agent MCP end-to-end (offline)", () => {
       await rm(paseoHome, { recursive: true, force: true });
       await rm(staticDir, { recursive: true, force: true });
       await rm(agentCwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("agent-scoped MCP capability is distinct and cannot select a different caller", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-home-agent-scope-"));
+    const staticDir = await mkdtemp(path.join(os.tmpdir(), "paseo-static-agent-scope-"));
+    const firstCwd = await mkdtemp(path.join(os.tmpdir(), "paseo-agent-scope-first-"));
+    const secondCwd = await mkdtemp(path.join(os.tmpdir(), "paseo-agent-scope-second-"));
+    const port = await getAvailablePort();
+    const recorder: LaunchRecorder = { recordedLaunches: [] };
+    const daemon = await createPaseoDaemon(
+      {
+        listen: `127.0.0.1:${port}`,
+        paseoHome,
+        corsAllowedOrigins: [],
+        hostnames: true,
+        mcpEnabled: true,
+        staticDir,
+        mcpDebug: false,
+        agentClients: createMcpRecordingAgentClients(recorder),
+        agentStoragePath: path.join(paseoHome, "agents"),
+      },
+      pino({ level: "silent" }),
+    );
+    await daemon.start();
+
+    const mcpUrl = `http://127.0.0.1:${port}/mcp/agents`;
+    const client = await createMcpClient(mcpUrl);
+    const createdAgentIds: string[] = [];
+    try {
+      for (const [title, cwd] of [
+        ["Scope parent one", firstCwd],
+        ["Scope parent two", secondCwd],
+      ]) {
+        const result = await client.callTool({
+          name: "create_agent",
+          args: {
+            cwd,
+            title,
+            provider: "claude/claude-test-model",
+            mode: "bypassPermissions",
+            initialPrompt: "reply with done and stop",
+          },
+        });
+        const agentId = getStructuredContent(result)?.agentId;
+        expect(typeof agentId).toBe("string");
+        createdAgentIds.push(agentId as string);
+      }
+
+      const firstConfig = recorder.recordedLaunches.at(-2)?.mcpServers?.paseo;
+      const secondConfig = recorder.recordedLaunches.at(-1)?.mcpServers?.paseo;
+      expect(firstConfig?.type).toBe("http");
+      expect(secondConfig?.type).toBe("http");
+      const firstToken = firstConfig?.headers?.Authorization?.replace(/^Bearer\s+/, "");
+      const secondToken = secondConfig?.headers?.Authorization?.replace(/^Bearer\s+/, "");
+      expect(firstToken).toBeTruthy();
+      expect(secondToken).toBeTruthy();
+      expect(firstToken).not.toBe(daemon.agentManager.getMcpAuthToken());
+      expect(secondToken).not.toBe(daemon.agentManager.getMcpAuthToken());
+      expect(firstToken).not.toBe(secondToken);
+
+      const forgedCaller = new URL(mcpUrl);
+      forgedCaller.searchParams.set("callerAgentId", createdAgentIds[1]!);
+      const forged = await fetch(forgedCaller, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${firstToken}`,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(forged.status).toBe(403);
+
+      const sharedToken = daemon.agentManager.getMcpAuthToken();
+      const sharedCaller = await fetch(new URL(`${mcpUrl}?callerAgentId=${createdAgentIds[0]}`), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${sharedToken}`,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(sharedCaller.status).toBe(403);
+
+      const missingCaller = await fetch(new URL(`${mcpUrl}?callerAgentId=${createdAgentIds[0]}`), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(missingCaller.status).toBe(403);
+      expect(daemon.agentManager.listAgents()).toHaveLength(2);
+    } finally {
+      for (const agentId of createdAgentIds) {
+        await client.callTool({ name: "kill_agent", args: { agentId } });
+      }
+      await client.close();
+      await daemon.stop();
+      await rm(paseoHome, { recursive: true, force: true });
+      await rm(staticDir, { recursive: true, force: true });
+      await rm(firstCwd, { recursive: true, force: true });
+      await rm(secondCwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("agent-scoped operation keys replay, lookup, and notify the authenticated parent", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-home-agent-operation-"));
+    const staticDir = await mkdtemp(path.join(os.tmpdir(), "paseo-static-agent-operation-"));
+    const parentCwd = await mkdtemp(path.join(os.tmpdir(), "paseo-agent-operation-parent-"));
+    const port = await getAvailablePort();
+    const recorder: LaunchRecorder = { recordedLaunches: [] };
+    const parentNotifications: string[] = [];
+    const daemon = await createPaseoDaemon(
+      {
+        listen: `127.0.0.1:${port}`,
+        paseoHome,
+        corsAllowedOrigins: [],
+        hostnames: true,
+        mcpEnabled: true,
+        staticDir,
+        mcpDebug: false,
+        agentClients: createMcpRecordingAgentClients(recorder, {
+          onStartTurn: (prompt, config) => {
+            if (config.title === "Operation parent") {
+              parentNotifications.push(
+                typeof prompt === "string" ? prompt : JSON.stringify(prompt),
+              );
+            }
+          },
+        }),
+        agentStoragePath: path.join(paseoHome, "agents"),
+      },
+      pino({ level: "silent" }),
+    );
+    await daemon.start();
+
+    const mcpUrl = `http://127.0.0.1:${port}/mcp/agents`;
+    const rootClient = await createMcpClient(mcpUrl);
+    let scopedClient: McpClient | null = null;
+    const createdAgentIds: string[] = [];
+    try {
+      const parentResult = await rootClient.callTool({
+        name: "create_agent",
+        args: {
+          cwd: parentCwd,
+          title: "Operation parent",
+          provider: "claude/claude-test-model",
+          mode: "bypassPermissions",
+          initialPrompt: "Parent session setup",
+        },
+      });
+      const parentId = getStructuredContent(parentResult)?.agentId;
+      expect(typeof parentId).toBe("string");
+      createdAgentIds.push(parentId as string);
+
+      const parent = daemon.agentManager.getAgent(parentId as string);
+      expect(parent?.workspaceId).toBeTruthy();
+      const paseoMcp = recorder.recordedLaunches.at(-1)?.mcpServers?.paseo;
+      expect(paseoMcp?.type).toBe("http");
+      const authorization = paseoMcp?.headers?.Authorization;
+      expect(authorization).toBeTruthy();
+      scopedClient = await createMcpClient(paseoMcp!.url, authorization!.replace(/^Bearer\s+/, ""));
+
+      const scopeResult = await scopedClient.callTool({ name: "get_agent_mcp_scope", args: {} });
+      expect(scopeResult.isError).not.toBe(true);
+      expect(getStructuredContent(scopeResult)).toMatchObject({
+        serverId: daemon.getServerId(),
+        agentId: parentId,
+        workspaceId: parent?.workspaceId,
+        scope: "agent_mcp_parent_v1",
+      });
+
+      const beforeInvalidCalls = recorder.recordedLaunches.length;
+      const wrongWorkspace = await scopedClient.callTool({
+        name: "create_agent",
+        args: {
+          operationKey: "wrong-workspace",
+          workspaceId: "wks_foreign",
+          title: "Must not start",
+          provider: "claude/claude-test-model",
+          settings: { thinkingOptionId: "high" },
+          initialPrompt: "Must not reach Create",
+        },
+      });
+      expect(wrongWorkspace.isError).toBe(true);
+      expect(recorder.recordedLaunches).toHaveLength(beforeInvalidCalls);
+
+      const wrongHost = await scopedClient.callTool({
+        name: "create_agent",
+        args: {
+          serverId: "srv_foreign",
+          operationKey: "wrong-host",
+          workspaceId: parent?.workspaceId,
+          title: "Must not route",
+          provider: "claude/claude-test-model",
+          settings: { thinkingOptionId: "high" },
+          initialPrompt: "Must not reach remote Create",
+        },
+      });
+      expect(wrongHost.isError).toBe(true);
+      expect(recorder.recordedLaunches).toHaveLength(beforeInvalidCalls);
+
+      const createArgs = {
+        operationKey: "run-luna-high-01",
+        workspaceId: parent?.workspaceId,
+        title: "Keyed child",
+        provider: "claude/claude-test-model",
+        settings: { modeId: "bypassPermissions", thinkingOptionId: "high" },
+        initialPrompt: "reply with done and stop",
+        notifyOnFinish: true,
+      };
+      const childResult = await scopedClient.callTool({ name: "create_agent", args: createArgs });
+      const childId = getStructuredContent(childResult)?.agentId;
+      expect(childResult.isError).not.toBe(true);
+      expect(typeof childId).toBe("string");
+      createdAgentIds.push(childId as string);
+
+      const child = daemon.agentManager.getAgent(childId as string);
+      expect(child?.labels).toMatchObject({
+        "paseo.parent-agent-id": parentId,
+        "paseo.parent-server-id": daemon.getServerId(),
+      });
+      expect(child?.workspaceId).toBe(parent?.workspaceId);
+      const operationLaunchCount = recorder.recordedLaunches.length;
+
+      const replay = await scopedClient.callTool({ name: "create_agent", args: createArgs });
+      expect(replay.isError).not.toBe(true);
+      expect(getStructuredContent(replay)?.agentId).toBe(childId);
+      expect(recorder.recordedLaunches).toHaveLength(operationLaunchCount);
+
+      const lookup = await scopedClient.callTool({
+        name: "get_agent_by_operation",
+        args: { operationKey: createArgs.operationKey },
+      });
+      expect(getStructuredContent(lookup)).toMatchObject({ status: "created", agentId: childId });
+
+      const changedIntent = await scopedClient.callTool({
+        name: "create_agent",
+        args: { ...createArgs, initialPrompt: "different immutable intent" },
+      });
+      expect(changedIntent.isError).toBe(true);
+      expect(recorder.recordedLaunches).toHaveLength(operationLaunchCount);
+
+      await vi.waitFor(
+        () => {
+          expect(parentNotifications.join("\n").toLowerCase().includes("finished")).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
+      const stopFinishedOperation = await scopedClient.callTool({
+        name: "cancel_agent_by_operation",
+        args: { operationKey: createArgs.operationKey },
+      });
+      expect(getStructuredContent(stopFinishedOperation)).toMatchObject({
+        status: "turn_mismatch",
+        cancelAcknowledged: false,
+      });
+      expect(daemon.agentManager.getAgent(childId as string)?.lifecycle).toBe("idle");
+    } finally {
+      for (const agentId of createdAgentIds) {
+        await rootClient.callTool({ name: "kill_agent", args: { agentId } }).catch(() => undefined);
+      }
+      await scopedClient?.close();
+      await rootClient.close();
+      await daemon.stop();
+      await rm(paseoHome, { recursive: true, force: true });
+      await rm(staticDir, { recursive: true, force: true });
+      await rm(parentCwd, { recursive: true, force: true });
     }
   }, 30_000);
 

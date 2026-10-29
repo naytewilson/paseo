@@ -361,6 +361,19 @@ describe("agent detach RPC", () => {
     }
     expect(parsed.features?.importSessionSearch).toBe(true);
   });
+
+  test("parses the authenticated agent MCP parent-scope feature gate", () => {
+    const parsed = parseServerInfoStatusPayload({
+      status: "server_info",
+      serverId: "srv-test",
+      features: { agentMcpParentScope: true },
+    });
+
+    expect(parsed?.features?.agentMcpParentScope).toBe(true);
+    expect(
+      parseServerInfoStatusPayload({ status: "server_info", serverId: "older-daemon" })?.features,
+    ).toBeUndefined();
+  });
 });
 
 describe("agent setting action responses", () => {

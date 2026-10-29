@@ -2752,6 +2752,58 @@ test("cancelAgentRun preserves running state when the provider interrupt hangs",
   }
 });
 
+test("cancelAgentRun does not interrupt a turn other than the operation's original turn", async () => {
+  const fixture = await createControlledInterruptFixture({
+    name: "cancel-turn-mismatch",
+    agentId: "00000000-0000-4000-8000-000000000313",
+    turnId: "later-followup-turn",
+    interrupt: async () => {},
+  });
+
+  try {
+    await fixture.startForegroundRun();
+
+    await expect(
+      fixture.manager.cancelAgentRun(fixture.agentId, "original-operation-turn"),
+    ).resolves.toEqual({ status: "turn_mismatch" });
+    expect(fixture.session.interruptCalled).toBe(false);
+    expect(fixture.manager.getAgent(fixture.agentId)).toMatchObject({
+      lifecycle: "running",
+      activeForegroundTurnId: "later-followup-turn",
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("cancelAgentRun interrupts the exact operation turn and keeps the session alive", async () => {
+  const fixture = await createControlledInterruptFixture({
+    name: "cancel-matching-turn",
+    agentId: "00000000-0000-4000-8000-000000000314",
+    turnId: "operation-initial-turn",
+    interrupt: async (session) => {
+      session.pushEvent({
+        type: "turn_completed",
+        provider: "codex",
+        turnId: "operation-initial-turn",
+      });
+    },
+  });
+
+  try {
+    await fixture.startForegroundRun();
+
+    await expect(
+      fixture.manager.cancelAgentRun(fixture.agentId, "operation-initial-turn"),
+    ).resolves.toEqual({ status: "settled" });
+    expect(fixture.session.interruptCalled).toBe(true);
+    expect(fixture.manager.getAgent(fixture.agentId)?.lifecycle).toBe("idle");
+    expect(fixture.manager.getAgent(fixture.agentId)?.session).toBe(fixture.session);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("cancelAgentRun preserves the active turn when the provider rejects the interrupt", async () => {
   const fixture = await createControlledInterruptFixture({
     name: "interrupt-rejected",

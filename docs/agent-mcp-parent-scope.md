@@ -1,0 +1,13 @@
+# Agent MCP parent scope
+
+Paseo advertises `server_info.features.agentMcpParentScope` when the server implements authenticated agent-scoped MCP sessions. Older clients remain wire-compatible because the feature declaration is optional. A client that needs parent-aware creation must require this capability and the `get_agent_mcp_scope` tool; it must not fall back to a caller-supplied parent ID.
+
+The daemon mints a random bearer capability for each agent runtime generation and binds it to the local server ID, daemon generation, agent ID, workspace ID, and `agent_mcp_parent_v1` scope. The daemon keeps only a digest for verification and injects the raw token only into that agent's runtime MCP configuration. It is not logged or persisted. Closing or deleting the runtime revokes its token. A `callerAgentId` URL query is an optional assertion: when present, it must match the token-bound identity. It never selects the parent.
+
+The shared daemon MCP credential continues to authenticate only unscoped root access. It cannot select an agent parent. A missing, expired, forged, shared, or mismatched agent capability is rejected before the MCP server or tool catalog is created. Each parent-aware operation also checks that the authenticated parent still exists, is not archived, and remains associated with the bound workspace.
+
+Agent-scoped `create_agent` may include an `operationKey` to make a request recoverable. Paseo scopes that key to the authenticated server and parent, then records an immutable intent fingerprint containing the workspace, explicit provider/model, settings including thinking effort, cwd, title, labels, and a digest of the initial prompt. Reusing a key with different intent fails before provider Create. A completed key replays its existing agent. A crash or ambiguous provider Create is reported as unknown and is not retried automatically. `get_agent_by_operation` reads the exact durable journal key and does not infer absence from the bounded recent-agent list.
+
+Finish notification is registered for the authenticated parent before the child receives its initial prompt. `cancel_agent_by_operation` can only interrupt the exact initial turn ID recorded for that operation. It keeps the child session alive, refuses to interrupt a later turn, and reports the observed lifecycle and turn after the cancellation request. Cancellation acknowledgement alone is not a terminal-success receipt.
+
+This Paseo scope authenticates parent identity; it does not create ANVIL grants, authorize protected work, accept receipts, or activate production authority. The actual caller must still obtain and exercise those permissions through the owning execution system.
