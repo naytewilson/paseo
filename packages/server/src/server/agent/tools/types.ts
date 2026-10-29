@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
+import type { AgentMcpCallerScope } from "../agent-mcp-capability.js";
 
 export class PaseoToolInputError extends Error {
   readonly status = 400;
@@ -49,6 +50,7 @@ export interface PaseoToolCatalog {
 
 export interface PaseoToolRuntimeContext {
   callerAgentId?: string;
+  callerScope?: AgentMcpCallerScope;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   enableVoiceTools?: boolean;
   voiceOnly?: boolean;

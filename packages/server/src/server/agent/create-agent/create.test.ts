@@ -9,7 +9,7 @@ import { createProviderSnapshotManagerStub } from "../../test-utils/session-stub
 import { AgentManager } from "../agent-manager.js";
 import { AgentStorage } from "../agent-storage.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
-import { createAgentCommand } from "./create.js";
+import { createAgentCommand, type CreateAgentCommandResult } from "./create.js";
 import type { ManagedAgent } from "../agent-manager.js";
 
 const logger = createTestLogger();
@@ -220,6 +220,52 @@ test("mcp create accepts provider-only internal input and leaves model undefined
     expect.objectContaining({
       workspaceId: "ws-create-test",
     }),
+  );
+});
+
+test("mcp create captures only the initial prompt turn id for operation-scoped stop", async () => {
+  const snapshot = {
+    id: "agent-1",
+    provider: "claude",
+    cwd: "/tmp/paseo-create-test",
+    workspaceId: "ws-create-test",
+    lifecycle: "running",
+    activeForegroundTurnId: "initial-turn-1",
+    runtimeInfo: null,
+  } as ManagedAgent;
+  const createAgent = vi.fn(async () => snapshot);
+  const dependencies: Parameters<typeof createAgentCommand>[0] = {
+    agentManager: {
+      createAgent,
+      getAgent: vi.fn(() => snapshot),
+      tryRunOutOfBand: vi.fn(() => false),
+      hasInFlightRun: vi.fn(() => false),
+      reloadStalePluginSession: async () => {},
+      streamAgent: vi.fn(() => (async function* noop() {})()),
+      waitForAgentRunStart: vi.fn(async () => undefined),
+    } as unknown as Parameters<typeof createAgentCommand>[0]["agentManager"],
+    agentStorage: {} as Parameters<typeof createAgentCommand>[0]["agentStorage"],
+    logger: createTestLogger(),
+    providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+  };
+
+  const result = (await createAgentCommand(dependencies, {
+    kind: "mcp",
+    agentId: "agent-1",
+    provider: "claude/claude-test-model",
+    cwd: "/tmp/paseo-create-test",
+    workspaceId: "ws-create-test",
+    title: "Keyed child",
+    initialPrompt: "run initial task",
+    notifyOnFinish: false,
+  })) as CreateAgentCommandResult & { initialTurnId?: string | null };
+
+  expect(result.initialPromptStarted).toBe(true);
+  expect(result.initialTurnId).toBe("initial-turn-1");
+  expect(createAgent).toHaveBeenCalledWith(
+    expect.objectContaining({ provider: "claude" }),
+    "agent-1",
+    expect.objectContaining({ workspaceId: "ws-create-test" }),
   );
 });
 

@@ -576,6 +576,11 @@ export class VoiceAssistantWebSocketServer {
   toolHosts() {
     return createToolHosts(this.connectedHosts);
   }
+
+  getAgentCreationService(): Pick<CreationService, "create" | "subscribe" | "lookup"> {
+    return this.creationService;
+  }
+
   private readonly passwordHash: string | undefined;
   private readonly credentialSource: DaemonAuthConfig | undefined;
   private readonly worktreesRoot: string | undefined;
@@ -1954,6 +1959,7 @@ export class VoiceAssistantWebSocketServer {
         agentRequestReceipts: true,
         workspaceRequestReceipts: true,
         creationLifecycle: true,
+        agentMcpParentScope: true,
         hubAgentRpc: true,
         backgroundWorkspaces: true,
         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.

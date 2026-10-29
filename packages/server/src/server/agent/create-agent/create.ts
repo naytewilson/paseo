@@ -63,6 +63,8 @@ export interface CreateAgentFromSessionInput {
 
 export interface CreateAgentFromMcpInput {
   kind: "mcp";
+  /** Server-reserved ID used by the durable creation journal. Never accepted from an MCP input. */
+  agentId?: string;
   provider: string;
   title: string;
   initialPrompt?: string;
@@ -75,6 +77,8 @@ export interface CreateAgentFromMcpInput {
   mode?: string;
   unattended?: boolean;
   promptFailure?: CreateAgentPromptFailureMode;
+  /** Redact provider start errors from logs and snapshots for keyed parent operations. */
+  redactPromptErrorDetails?: boolean;
   notifyOnFinish: boolean;
   internal?: boolean;
   detached?: boolean;
@@ -84,6 +88,8 @@ export interface CreateAgentFromMcpInput {
     agentId: string;
     createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
   }) => void;
+  /** Commits the durable agent-ready checkpoint before the initial prompt is sent. */
+  onAgentReady?: (agent: ManagedAgent) => Promise<void>;
   onWorktreeCreated?: (createdWorktree: CreatePaseoWorktreeWorkflowResult) => void;
   callerAgentId?: string;
   callerContext?: {
@@ -110,6 +116,7 @@ export interface CreateAgentCommandResult {
   liveSnapshot: ManagedAgent;
   initialPromptStarted: boolean;
   initialPromptError: unknown | null;
+  initialTurnId: string | null;
   createdWorktree?: CreatePaseoWorktreeWorkflowResult;
 }
 
@@ -164,7 +171,7 @@ export async function createAgentCommand(
 
   const snapshot = await dependencies.agentManager.createAgent(
     resolved.config,
-    input.kind === "session" ? input.agentId : undefined,
+    input.agentId,
     resolved.createOptions,
   );
 
@@ -172,6 +179,7 @@ export async function createAgentCommand(
 
   let liveSnapshot = snapshot;
   let initialPromptStarted = false;
+  let initialTurnId: string | null = null;
   let initialPromptError: unknown | null = null;
   if (input.kind === "mcp") {
     input.onCreated?.({ agentId: snapshot.id, createdWorktree: resolved.createdWorktree ?? null });
@@ -191,6 +199,8 @@ export async function createAgentCommand(
         )
       : undefined;
 
+  if (input.kind === "mcp") await input.onAgentReady?.(snapshot);
+
   if (resolved.prompt !== undefined) {
     const sendResult = await sendInitialPrompt(dependencies, resolved, snapshot).catch(
       async (error) => {
@@ -201,6 +211,7 @@ export async function createAgentCommand(
     notification?.accept();
     initialPromptStarted = sendResult.started;
     liveSnapshot = sendResult.liveSnapshot;
+    initialTurnId = sendResult.started ? sendResult.liveSnapshot.activeForegroundTurnId : null;
     initialPromptError = sendResult.error ?? null;
   }
 
@@ -209,6 +220,7 @@ export async function createAgentCommand(
     liveSnapshot,
     initialPromptStarted,
     initialPromptError,
+    initialTurnId,
     ...(resolved.createdWorktree ? { createdWorktree: resolved.createdWorktree } : {}),
   };
 }
@@ -335,6 +347,7 @@ async function resolveMcpCreateAgent(
     source: input.callerAgentId
       ? { kind: "agent-message", agentId: input.callerAgentId }
       : undefined,
+    runOptions: input.redactPromptErrorDetails ? { suppressProviderErrorDetails: true } : undefined,
     createdWorktree,
     promptFailure: input.promptFailure ?? "log",
   };

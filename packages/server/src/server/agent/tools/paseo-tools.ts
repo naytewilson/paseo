@@ -13,9 +13,11 @@ import { stat } from "node:fs/promises";
 import { z } from "zod";
 import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
+import { createHash } from "node:crypto";
 
 import type { AgentMode, AgentProvider, AgentSessionConfig } from "../agent-sdk-types.js";
-import type { AgentManager } from "../agent-manager.js";
+import type { AgentManager, ManagedAgent } from "../agent-manager.js";
+import type { AgentMcpCallerScope } from "../agent-mcp-capability.js";
 import { ActiveTurnBehaviorSchema, AgentProfileSchema } from "@getpaseo/protocol/messages";
 import type { DaemonConfigStore } from "../../daemon-config-store.js";
 import {
@@ -115,10 +117,12 @@ import {
 } from "./types.js";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { isPaseoToolEnabled } from "../paseo-tool-policy.js";
+import type { CreationService } from "../../creation/index.js";
 
 export interface PaseoToolHostDependencies {
   agentMessages?: () => AgentMessageDelivery;
   finishSubscriptions?: () => FinishSubscriptions;
+  creationService?: Pick<CreationService, "create" | "subscribe" | "lookup">;
   serverId?: string;
   hosts?: () => ToolHosts;
   agentManager: AgentManager;
@@ -165,6 +169,7 @@ export interface PaseoToolHostDependencies {
    * Used for cwd/mode inheritance when agents spawn child agents.
    */
   callerAgentId?: string;
+  callerScope?: AgentMcpCallerScope;
   /**
    * Optional resolver for session-bound speak handlers.
    * Used by hidden voice agents to narrate through daemon-managed TTS.
@@ -664,6 +669,43 @@ function createToolCatalog(
     if (!options.finishSubscriptions) throw new Error("Finish subscriptions are not configured");
     return options.finishSubscriptions();
   }
+  async function requireAuthenticatedParentScope(): Promise<AgentMcpCallerScope> {
+    const authenticatedScope = options.callerScope;
+    if (
+      !authenticatedScope ||
+      !callerAgentId ||
+      authenticatedScope.scope !== "agent_mcp_parent_v1" ||
+      authenticatedScope.agentId !== callerAgentId ||
+      authenticatedScope.serverId !== options.serverId
+    ) {
+      throw new PaseoToolInputError("Authenticated agent scope is unavailable");
+    }
+    const liveParent = agentManager.getAgent(authenticatedScope.agentId);
+    const storedParent = await agentStorage.get(authenticatedScope.agentId);
+    if (
+      (!liveParent && (!storedParent || Boolean(storedParent.archivedAt))) ||
+      (liveParent?.workspaceId ?? storedParent?.workspaceId ?? null) !==
+        authenticatedScope.workspaceId
+    ) {
+      throw new PaseoToolInputError("Authenticated parent is no longer active in this workspace");
+    }
+    return authenticatedScope;
+  }
+  async function validateOperationKeyInput(args: unknown): Promise<string | undefined> {
+    if (!args || typeof args !== "object") return undefined;
+    const input = args as Record<string, unknown>;
+    if (typeof input.operationKey !== "string" || !input.operationKey.trim()) return undefined;
+    if (scope !== "agent" || !callerAgentId) {
+      throw new PaseoToolInputError("operationKey requires an authenticated agent scope");
+    }
+    await requireAuthenticatedParentScope();
+    return input.operationKey.trim();
+  }
+  function operationKeyFor(parent: AgentMcpCallerScope, operationKey: string): string {
+    return createHash("sha256")
+      .update(`${parent.serverId}\0${parent.agentId}\0${operationKey}`)
+      .digest("hex");
+  }
   async function prepareRemoteNotification(
     name: string,
     destination: string | undefined,
@@ -764,6 +806,15 @@ function createToolCatalog(
       };
       handler = async ({ serverId, ...input }, context) => {
         const destination = serverId ?? options.serverId;
+        if (
+          name === "create_agent" &&
+          input.operationKey !== undefined &&
+          destination !== options.serverId
+        ) {
+          throw new PaseoToolInputError(
+            "Keyed agent creation is restricted to the authenticated local host",
+          );
+        }
         const remoteNotification = await prepareRemoteNotification(name, destination, input);
         try {
           const response = await hostResolver.use(serverId, (host) =>
@@ -1212,6 +1263,13 @@ function createToolCatalog(
   };
   const agentToAgentInputSchema = {
     ...canonicalCreateAgentFields,
+    operationKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Stable caller-owned key for exact, durable create reconciliation."),
     notifyOnFinish: z
       .boolean()
       .optional()
@@ -1233,6 +1291,7 @@ function createToolCatalog(
   const legacyAgentToAgentInputSchema = {
     ...commonCreateAgentFields,
     ...legacyCreateAgentPlacementFields,
+    operationKey: agentToAgentInputSchema.operationKey,
     notifyOnFinish: agentToAgentInputSchema.notifyOnFinish,
   };
   const legacyTopLevelCreateAgentInputSchema = {
@@ -1585,6 +1644,143 @@ function createToolCatalog(
     },
   );
 
+  if (scope === "agent" && options.callerScope) {
+    registerTool(
+      "get_agent_mcp_scope",
+      {
+        title: "Get authenticated agent scope",
+        description:
+          "Return the server-verified identity and workspace bound to this agent MCP session.",
+        inputSchema: {},
+        outputSchema: {
+          serverId: z.string(),
+          daemonGeneration: z.string(),
+          generation: z.string(),
+          agentId: z.string(),
+          workspaceId: z.string().nullable(),
+          scope: z.literal("agent_mcp_parent_v1"),
+        },
+      },
+      async () => {
+        const parent = await requireAuthenticatedParentScope();
+        return { content: [], structuredContent: ensureValidJson(parent) };
+      },
+    );
+
+    registerTool(
+      "get_agent_by_operation",
+      {
+        title: "Find agent by operation key",
+        description:
+          "Read the exact durable result for an operation key owned by this authenticated parent.",
+        inputSchema: { operationKey: z.string().trim().min(1).max(200) },
+      },
+      async ({ operationKey }) => {
+        const parent = await requireAuthenticatedParentScope();
+        if (!options.creationService) {
+          throw new PaseoToolInputError("Durable operation reconciliation is unavailable");
+        }
+        const found = await options.creationService.lookup(
+          "agent",
+          operationKeyFor(parent, operationKey),
+        );
+        if (!found) {
+          return { content: [], structuredContent: { status: "not_found", outcomeUnknown: false } };
+        }
+        let phase: string = found.snapshot.phase;
+        if (found.snapshot.outcomeUnknown) {
+          phase = "unknown";
+        } else if (found.active) {
+          phase = "pending";
+        } else if (
+          found.snapshot.phase === "completed" ||
+          found.snapshot.phase === "prompt_started"
+        ) {
+          phase = "created";
+        }
+        return {
+          content: [],
+          structuredContent: ensureValidJson({
+            status: phase,
+            outcomeUnknown: found.snapshot.outcomeUnknown ?? false,
+            operationId: found.snapshot.idempotencyKey,
+            agentId: found.snapshot.agentId,
+            workspaceId: found.snapshot.workspaceId,
+            lifecycle: found.snapshot.agent?.status,
+            initialTurnId: found.initialTurnId,
+          }),
+        };
+      },
+    );
+
+    registerTool(
+      "cancel_agent_by_operation",
+      {
+        title: "Cancel initial agent turn by operation",
+        description:
+          "Interrupt only the initial turn created by this operation; this does not close the agent.",
+        inputSchema: { operationKey: z.string().trim().min(1).max(200) },
+      },
+      async ({ operationKey }) => {
+        const parent = await requireAuthenticatedParentScope();
+        if (!options.creationService) {
+          throw new PaseoToolInputError("Durable operation reconciliation is unavailable");
+        }
+        const found = await options.creationService.lookup(
+          "agent",
+          operationKeyFor(parent, operationKey),
+        );
+        if (!found) {
+          return { content: [], structuredContent: { status: "not_found", outcomeUnknown: false } };
+        }
+        if (found.snapshot.outcomeUnknown || !found.snapshot.agentId || !found.initialTurnId) {
+          return {
+            content: [],
+            structuredContent: ensureValidJson({
+              status: "unknown",
+              outcomeUnknown: true,
+              operationId: found.snapshot.idempotencyKey,
+              agentId: found.snapshot.agentId,
+              initialTurnId: found.initialTurnId,
+            }),
+          };
+        }
+        const agentId = found.snapshot.agentId;
+        const before = agentManager.getAgent(agentId);
+        if (!before || before.activeForegroundTurnId !== found.initialTurnId) {
+          return {
+            content: [],
+            structuredContent: ensureValidJson({
+              status: "turn_mismatch",
+              cancelAcknowledged: false,
+              outcomeUnknown: false,
+              operationId: found.snapshot.idempotencyKey,
+              agentId,
+              initialTurnId: found.initialTurnId,
+              observedTurnId: before?.activeForegroundTurnId ?? null,
+              lifecycle: before?.lifecycle ?? "closed",
+            }),
+          };
+        }
+        const cancellation = await agentManager.cancelAgentRun(agentId, found.initialTurnId);
+        const after = agentManager.getAgent(agentId);
+        return {
+          content: [],
+          structuredContent: ensureValidJson({
+            status: cancellation.status,
+            cancelAcknowledged: cancellation.status === "settled",
+            outcomeUnknown: cancellation.status === "refused",
+            operationId: found.snapshot.idempotencyKey,
+            agentId,
+            initialTurnId: found.initialTurnId,
+            observedTurnId: after?.activeForegroundTurnId ?? null,
+            lifecycle: after?.lifecycle ?? "closed",
+          }),
+        };
+      },
+    );
+  }
+
   registerTool(
     "create_agent",
     {
@@ -1604,6 +1800,7 @@ function createToolCatalog(
       },
     },
     async (args: unknown) => {
+      const operationKey = await validateOperationKeyInput(args);
       const resolvedArgs = await resolveCreateAgentToolArgs(args);
       const { parsedArgs } = resolvedArgs;
       let notifyOnFinish: boolean;
@@ -1614,45 +1811,59 @@ function createToolCatalog(
       }
       const selectedProvider = resolveRequiredProviderModel(parsedArgs.provider).provider;
       const inheritedConfig = resolveInheritedProviderConfig(selectedProvider);
-      const { snapshot, initialPromptStarted } = await createAgentCommand(
-        {
-          agentManager,
-          agentStorage,
-          finishSubscriptions: options.finishSubscriptions?.(),
-          logger: childLogger,
-          paseoHome: options.paseoHome,
-          worktreesRoot: options.worktreesRoot,
-          terminalManager,
-          providerSnapshotManager,
-          createPaseoWorktree: options.createPaseoWorktree,
-          ...(options.ensureWorkspaceForCreate
-            ? { ensureWorkspaceForCreate: options.ensureWorkspaceForCreate }
-            : {}),
-        },
-        {
-          kind: "mcp",
-          provider: parsedArgs.provider,
-          title: parsedArgs.title,
-          initialPrompt: parsedArgs.initialPrompt,
-          config: inheritedConfig,
-          cwd: resolvedArgs.cwd,
-          workspaceId: resolvedArgs.workspaceId,
-          thinking: parsedArgs.settings?.thinkingOptionId,
-          features: parsedArgs.settings?.features,
-          labels: {
-            ...parsedArgs.labels,
-            ...(callerAgentId && !resolvedArgs.detached && options.serverId
-              ? { "paseo.parent-server-id": options.serverId }
+      const launch = async (
+        agentId?: string,
+        onAgentReady?: (agent: ManagedAgent) => Promise<void>,
+      ) =>
+        createAgentCommand(
+          {
+            agentManager,
+            agentStorage,
+            finishSubscriptions: options.finishSubscriptions?.(),
+            logger: childLogger,
+            paseoHome: options.paseoHome,
+            worktreesRoot: options.worktreesRoot,
+            terminalManager,
+            providerSnapshotManager,
+            createPaseoWorktree: options.createPaseoWorktree,
+            ...(options.ensureWorkspaceForCreate
+              ? { ensureWorkspaceForCreate: options.ensureWorkspaceForCreate }
               : {}),
           },
-          mode: parsedArgs.settings?.modeId,
-          promptFailure: "throw",
-          notifyOnFinish,
-          detached: resolvedArgs.detached,
-          callerAgentId,
-          callerContext,
-        },
-      );
+          {
+            kind: "mcp",
+            ...(agentId ? { agentId } : {}),
+            provider: parsedArgs.provider,
+            title: parsedArgs.title,
+            initialPrompt: parsedArgs.initialPrompt,
+            config: inheritedConfig,
+            cwd: resolvedArgs.cwd,
+            workspaceId: resolvedArgs.workspaceId,
+            thinking: parsedArgs.settings?.thinkingOptionId,
+            features: parsedArgs.settings?.features,
+            labels: {
+              ...parsedArgs.labels,
+              ...(callerAgentId && !resolvedArgs.detached && options.serverId
+                ? { "paseo.parent-server-id": options.serverId }
+                : {}),
+            },
+            mode: parsedArgs.settings?.modeId,
+            promptFailure: "throw",
+            notifyOnFinish,
+            redactPromptErrorDetails: Boolean(operationKey),
+            ...(onAgentReady ? { onAgentReady } : {}),
+            detached: resolvedArgs.detached,
+            callerAgentId,
+            callerContext,
+          },
+        );
+
+      const execution = await executeAgentCreate(operationKey, resolvedArgs, parsedArgs, launch);
+      if (execution.earlyResponse) return execution.earlyResponse;
+      const snapshot = execution.snapshot;
+      if (!snapshot) throw new PaseoToolInputError("Agent creation returned no agent result");
+      const initialPromptStarted = execution.initialPromptStarted;
+      const operationSnapshot = execution.operationSnapshot;
 
       // Return immediately for async creation.
       const currentSnapshot = agentManager.getAgent(snapshot.id) ?? snapshot;
@@ -1664,6 +1875,13 @@ function createToolCatalog(
         content: [],
         structuredContent: ensureValidJson({
           agentId: currentSnapshot.id,
+          ...(operationSnapshot
+            ? {
+                operationId: operationSnapshot.idempotencyKey,
+                operationStatus: operationSnapshot.phase,
+                outcomeUnknown: operationSnapshot.outcomeUnknown ?? false,
+              }
+            : {}),
           type: snapshot.provider,
           status: currentSnapshot.lifecycle,
           cwd: currentSnapshot.cwd,
@@ -1692,6 +1910,13 @@ function createToolCatalog(
         cwd: string | undefined;
         workspaceId: string | undefined;
       };
+
+  interface AgentCreateExecution {
+    snapshot: Awaited<ReturnType<typeof createAgentCommand>>["snapshot"] | null;
+    initialPromptStarted: boolean;
+    operationSnapshot?: Awaited<ReturnType<CreationService["create"]>>;
+    earlyResponse?: PaseoToolResult;
+  }
 
   async function resolveCreateAgentToolArgs(args: unknown): Promise<ResolvedCreateAgentToolArgs> {
     const placement = args as {
@@ -1780,6 +2005,139 @@ function createToolCatalog(
       detached: false,
       cwd,
       workspaceId,
+    };
+  }
+
+  async function createKeyedAgent(
+    operationKey: string,
+    resolved: Extract<ResolvedCreateAgentToolArgs, { kind: "agent-scoped" }>,
+    parsed: AgentToAgentCreateAgentArgs | LegacyAgentToAgentCreateAgentArgs,
+    launch: (
+      agentId?: string,
+      onAgentReady?: (agent: ManagedAgent) => Promise<void>,
+    ) => ReturnType<typeof createAgentCommand>,
+  ): Promise<{
+    snapshot: Awaited<ReturnType<typeof createAgentCommand>>["snapshot"] | null;
+    initialPromptStarted: boolean;
+    operation: Awaited<ReturnType<CreationService["create"]>>;
+  }> {
+    if (!options.creationService) {
+      throw new PaseoToolInputError("Durable operation reconciliation is unavailable");
+    }
+    const parent = await requireAuthenticatedParentScope();
+    if (resolved.detached) {
+      throw new PaseoToolInputError(
+        "Authenticated parent operations cannot create detached agents",
+      );
+    }
+    const modelRequest = resolveRequiredProviderModel(parsed.provider);
+    const request = {
+      parent: { serverId: parent.serverId, agentId: parent.agentId },
+      workspaceId: resolved.workspaceId,
+      provider: modelRequest.provider,
+      model: modelRequest.model ?? null,
+      thinkingOptionId: parsed.settings?.thinkingOptionId ?? null,
+      modeId: parsed.settings?.modeId ?? null,
+      featuresDigest: createHash("sha256")
+        .update(JSON.stringify(parsed.settings?.features ?? null))
+        .digest("hex"),
+      cwd: resolved.cwd ?? null,
+      title: parsed.title,
+      labels: parsed.labels ?? {},
+      promptDigest: createHash("sha256").update(parsed.initialPrompt).digest("hex"),
+    };
+    const key = operationKeyFor(parent, operationKey);
+    const readAgent = async (id: string) => {
+      const live = agentManager.getAgent(id);
+      if (live) return toAgentPayload(live);
+      const stored = await agentStorage.get(id);
+      return stored
+        ? buildStoredAgentPayload(
+            stored,
+            new Set(providerSnapshotManager.listRegisteredProviderIds()),
+          )
+        : null;
+    };
+    const operation = await options.creationService.create({
+      kind: "agent",
+      key,
+      request,
+      workspaceId: resolved.workspaceId,
+      hasAgent: true,
+      hasPrompt: true,
+      ambiguousAgentCreateFailure: true,
+      exists: async (_kind, id) =>
+        Boolean(agentManager.getAgent(id) || (await agentStorage.get(id))),
+      readAgent,
+      createAgent: async (reservedId, _workspace, onReady) => {
+        const created = await launch(reservedId, async (ready) => onReady(toAgentPayload(ready)));
+        return {
+          agent: toAgentPayload(created.snapshot),
+          initialPromptStarted: created.initialPromptStarted,
+          initialTurnId: created.initialTurnId,
+        };
+      },
+    });
+    return {
+      snapshot: operation.agent
+        ? (operation.agent as unknown as Awaited<ReturnType<typeof createAgentCommand>>["snapshot"])
+        : null,
+      initialPromptStarted: operation.phase === "prompt_started" || operation.phase === "completed",
+      operation,
+    };
+  }
+
+  async function executeAgentCreate(
+    operationKey: string | undefined,
+    resolved: ResolvedCreateAgentToolArgs,
+    parsed:
+      | AgentToAgentCreateAgentArgs
+      | LegacyAgentToAgentCreateAgentArgs
+      | TopLevelCreateAgentArgs
+      | LegacyTopLevelCreateAgentArgs,
+    launch: (
+      agentId?: string,
+      onAgentReady?: (agent: ManagedAgent) => Promise<void>,
+    ) => ReturnType<typeof createAgentCommand>,
+  ): Promise<AgentCreateExecution> {
+    if (!operationKey) {
+      const created = await launch();
+      return { snapshot: created.snapshot, initialPromptStarted: created.initialPromptStarted };
+    }
+    if (resolved.kind !== "agent-scoped") {
+      throw new PaseoToolInputError("operationKey requires an authenticated agent scope");
+    }
+    const keyed = await createKeyedAgent(
+      operationKey,
+      resolved,
+      parsed as AgentToAgentCreateAgentArgs | LegacyAgentToAgentCreateAgentArgs,
+      launch,
+    );
+    if (keyed.snapshot) {
+      return {
+        snapshot: keyed.snapshot,
+        initialPromptStarted: keyed.initialPromptStarted,
+        operationSnapshot: keyed.operation,
+      };
+    }
+    const status = keyed.operation.outcomeUnknown ? "unknown" : keyed.operation.phase;
+    return {
+      snapshot: null,
+      initialPromptStarted: false,
+      operationSnapshot: keyed.operation,
+      earlyResponse: {
+        content: [],
+        structuredContent: ensureValidJson({
+          operationKey,
+          operationId: keyed.operation.idempotencyKey,
+          operationStatus: status,
+          outcomeUnknown: keyed.operation.outcomeUnknown ?? false,
+          status,
+          errorCode: keyed.operation.outcomeUnknown
+            ? "agent_create_outcome_unknown"
+            : "agent_create_failed",
+        }),
+      },
     };
   }
 

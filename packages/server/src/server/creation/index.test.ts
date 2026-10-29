@@ -1,6 +1,6 @@
 import pino from "pino";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -9,7 +9,7 @@ import type {
   CreationSnapshot,
   WorkspaceDescriptorPayload,
 } from "@getpaseo/protocol/messages";
-import { CreationService, type CreationInput } from "./index.js";
+import { CreationService, type CreatedAgent, type CreationInput } from "./index.js";
 
 const silentLogger = pino({ level: "silent" });
 const directories: string[] = [];
@@ -145,21 +145,167 @@ test("a failed agent startup retries only that stage with the reserved IDs", asy
   expect(attempts).toBe(2);
 });
 
+test("MCP-keyed agent startup errors stay unknown and never retry Create", async () => {
+  const f = await fixture();
+  let creates = 0;
+  const input = {
+    kind: "agent" as const,
+    key: "parent-scoped-key",
+    request: {
+      parent: { serverId: "srv_local", agentId: "parent" },
+      workspaceId: workspace.id,
+      provider: "codex/gpt-6-luna",
+      thinkingOptionId: "high",
+      cwd: "/project/worktree",
+      promptDigest: "f".repeat(64),
+    },
+    workspaceId: workspace.id,
+    hasAgent: true,
+    hasPrompt: true,
+    exists: async () => false,
+    readAgent: async () => null,
+    ambiguousAgentCreateFailure: true,
+    createAgent: async () => {
+      creates++;
+      throw new Error(
+        "provider response lost after Create may have started: credential=private-token",
+      );
+    },
+  } as CreationInput & { ambiguousAgentCreateFailure: true };
+
+  const first = await f.service.create(input);
+  expect(first).toMatchObject({
+    phase: "failed",
+    failedStage: "agent",
+    outcomeUnknown: true,
+    error: "agent_create_outcome_unknown",
+  });
+  expect(await new CreationService(f.directory, silentLogger).create(input)).toEqual(first);
+  expect(creates).toBe(1);
+});
+
+test("agent operation lookup is exact beyond the bounded recent-agent list", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "creation-exact-operation-lookup-"));
+  directories.push(directory);
+  const service = new CreationService(directory, silentLogger);
+  let targetAgentId: string | undefined;
+
+  for (let index = 0; index < 205; index++) {
+    const key = `parent-operation-${index}`;
+    const created = await service.create({
+      kind: "agent",
+      key,
+      request: {
+        parent: { serverId: "srv_local", agentId: "parent" },
+        workspaceId: workspace.id,
+        promptDigest: createHash("sha256").update(key).digest("hex"),
+      },
+      workspaceId: workspace.id,
+      hasAgent: true,
+      hasPrompt: false,
+      exists: async () => false,
+      readAgent: async (id) => ({ ...agent, id }),
+      createAgent: async (id, _workspace, onReady) => {
+        const createdAgent = { ...agent, id, workspaceId: workspace.id };
+        await onReady(createdAgent);
+        const createdResult: CreatedAgent & { initialTurnId: string } = {
+          agent: createdAgent,
+          initialPromptStarted: false,
+          initialTurnId: `turn-${index}`,
+        };
+        return createdResult;
+      },
+    });
+    if (index === 204) targetAgentId = created.agentId ?? undefined;
+  }
+
+  const found = await service.lookup("agent", "parent-operation-204");
+  expect(found?.snapshot).toMatchObject({ phase: "completed", agentId: targetAgentId });
+  expect(found?.initialTurnId).toBe("turn-204");
+  expect(await service.lookup("agent", "not-created")).toBeNull();
+});
+
+test("a restart converts an in-flight agent Create to unknown, never not-found", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "creation-operation-restart-"));
+  const recoveredDirectory = await mkdtemp(join(tmpdir(), "creation-operation-recovered-"));
+  directories.push(directory, recoveredDirectory);
+  const service = new CreationService(directory, silentLogger);
+  const entered = deferred();
+  const finish = deferred();
+  let creates = 0;
+  const input: CreationInput = {
+    kind: "agent",
+    key: "parent-restart-operation",
+    request: {
+      parent: { serverId: "srv_local", agentId: "parent" },
+      workspaceId: workspace.id,
+      promptDigest: createHash("sha256").update("initial prompt").digest("hex"),
+    },
+    workspaceId: workspace.id,
+    hasAgent: true,
+    hasPrompt: true,
+    ambiguousAgentCreateFailure: true,
+    exists: async () => false,
+    readAgent: async () => null,
+    createAgent: async () => {
+      creates++;
+      entered.resolve();
+      await finish.promise;
+      throw new Error("provider response was lost");
+    },
+  };
+  const running = service.create(input);
+  await entered.promise;
+  await cp(directory, recoveredDirectory, { recursive: true });
+
+  const recovered = new CreationService(recoveredDirectory, silentLogger);
+  const lookup = await recovered.lookup("agent", input.key);
+  expect(lookup?.snapshot).toMatchObject({
+    phase: "failed",
+    failedStage: "agent",
+    outcomeUnknown: true,
+  });
+  expect(await recovered.lookup("agent", input.key)).toMatchObject({
+    snapshot: { outcomeUnknown: true },
+  });
+
+  finish.resolve();
+  await running;
+  expect(creates).toBe(1);
+});
+
 test("an uncertain prompt outcome never resends or removes its workspace and agent", async () => {
   const f = await fixture();
   let prompts = 0;
+  const providerSecret = "private-prompt-token-8421";
   f.input.createAgent = async (_id, _workspace, onReady) => {
     await onReady(agent);
     prompts++;
-    throw new Error("connection lost after provider accepted prompt");
+    throw new Error(`provider rejected prompt with credential=${providerSecret}`);
   };
   const result = await f.service.create(f.input);
   expect(result).toMatchObject({
     phase: "failed",
     failedStage: "prompt",
     outcomeUnknown: true,
+    error: "agent_prompt_outcome_unknown",
+    errorCode: "agent_prompt_outcome_unknown",
     workspace,
     agent,
+  });
+  const journalFiles = await readdir(f.directory);
+  const journalContents = await Promise.all(
+    journalFiles
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => readFile(join(f.directory, name), "utf8")),
+  );
+  expect(journalContents.join("\n")).not.toContain(providerSecret);
+  const lookup = await f.service.lookup("workspace", f.input.key);
+  expect(lookup?.snapshot).toMatchObject({
+    failedStage: "prompt",
+    outcomeUnknown: true,
+    error: "agent_prompt_outcome_unknown",
+    errorCode: "agent_prompt_outcome_unknown",
   });
   expect(await new CreationService(f.directory, silentLogger).create(f.input)).toEqual(result);
   expect(prompts).toBe(1);

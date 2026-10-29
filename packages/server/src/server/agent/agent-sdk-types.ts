@@ -201,6 +201,8 @@ export interface AgentRunOptions {
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
   clientMessageId?: string;
+  /** Keep provider error details out of durable state for parent-keyed initial prompts. */
+  suppressProviderErrorDetails?: boolean;
 }
 
 export interface AgentSteerOptions extends AgentRunOptions {
