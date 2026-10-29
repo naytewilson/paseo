@@ -172,6 +172,7 @@ async function startOfflineMcpDaemon(): Promise<OfflineMcpDaemon> {
       mcpEnabled: true,
       staticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
     },
@@ -243,7 +244,8 @@ class RecordingAgentClient implements AgentClient {
   async createSession(
     ...args: Parameters<AgentClient["createSession"]>
   ): ReturnType<AgentClient["createSession"]> {
-    this.recorder.recordedLaunches.push(args[0]);
+    // Background title/branch helpers are not the user agents exercised here.
+    if (!args[0].internal) this.recorder.recordedLaunches.push(args[0]);
     const session = await this.inner.createSession(...args);
     const failure = this.recorder.failStartTurnFor;
     if (!failure || args[0].title !== failure.title) return session;
@@ -263,7 +265,9 @@ class RecordingAgentClient implements AgentClient {
   async resumeSession(
     ...args: Parameters<AgentClient["resumeSession"]>
   ): ReturnType<AgentClient["resumeSession"]> {
-    if (args[1]) this.recorder.recordedLaunches.push(args[1] as AgentSessionConfig);
+    if (args[1] && !args[1].internal) {
+      this.recorder.recordedLaunches.push(args[1] as AgentSessionConfig);
+    }
     return this.inner.resumeSession(...args);
   }
 
@@ -324,6 +328,7 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpEnabled: true,
       staticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
     };
@@ -379,10 +384,11 @@ describe("agent MCP end-to-end (offline)", () => {
     }
   }, 30_000);
 
-  test("agent-scoped operation keys replay, lookup, and notify the authenticated parent", async () => {
+  test("keyed Foundry children retain parent scope across workspace placement and replay", async () => {
     const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-home-agent-operation-"));
     const staticDir = await mkdtemp(path.join(os.tmpdir(), "paseo-static-agent-operation-"));
     const parentCwd = await mkdtemp(path.join(os.tmpdir(), "paseo-agent-operation-parent-"));
+    const cellCwd = await mkdtemp(path.join(os.tmpdir(), "paseo-foundry-operation-cell-"));
     const port = await getAvailablePort();
     const recorder: LaunchRecorder = { recordedLaunches: [] };
     const parentNotifications: string[] = [];
@@ -395,6 +401,7 @@ describe("agent MCP end-to-end (offline)", () => {
         mcpEnabled: true,
         staticDir,
         mcpDebug: false,
+        relayEnabled: false,
         agentClients: createMcpRecordingAgentClients(recorder, {
           onStartTurn: (prompt, config) => {
             if (config.title === "Operation parent") {
@@ -450,9 +457,15 @@ describe("agent MCP end-to-end (offline)", () => {
         scope: "agent_mcp_parent_v1",
       });
 
+      const cell = await createLocalWorkspace(scopedClient, cellCwd);
+      expect("workspaceId" in cell).toBe(true);
+      if (!("workspaceId" in cell)) throw new Error("Expected Foundry cell workspace");
+      expect(typeof cell.workspaceId).toBe("string");
+      expect(cell.workspaceId).not.toBe(parentScope?.workspaceId);
+
       const createArgs = {
         operationKey: "run-luna-high-01",
-        workspaceId: parentScope?.workspaceId,
+        workspaceId: cell.workspaceId,
         title: "Keyed child",
         provider: "claude/claude-test-model",
         settings: { thinkingOptionId: "high" },
@@ -462,7 +475,7 @@ describe("agent MCP end-to-end (offline)", () => {
       const initialLaunchCount = recorder.recordedLaunches.length;
       const childResult = await scopedClient.callTool({ name: "create_agent", args: createArgs });
       const childId = getStructuredContent(childResult)?.agentId;
-      expect(childResult.isError).not.toBe(true);
+      expect(childResult.isError, JSON.stringify(childResult)).not.toBe(true);
       expect(typeof childId).toBe("string");
       createdAgentIds.push(childId as string);
 
@@ -471,12 +484,20 @@ describe("agent MCP end-to-end (offline)", () => {
         "paseo.parent-agent-id": parentId,
         "paseo.parent-server-id": daemon.getServerId(),
       });
-      expect(childRecord?.workspaceId).toBe(parentScope?.workspaceId);
+      expect(childRecord?.workspaceId).toBe(cell.workspaceId);
+      expect(childRecord?.cwd).toBe(cellCwd);
       expect(recorder.recordedLaunches).toHaveLength(initialLaunchCount + 1);
 
       const replay = await scopedClient.callTool({ name: "create_agent", args: createArgs });
       expect(replay.isError).not.toBe(true);
       expect(getStructuredContent(replay)?.agentId).toBe(childId);
+      expect(recorder.recordedLaunches).toHaveLength(initialLaunchCount + 1);
+
+      const movedReplay = await scopedClient.callTool({
+        name: "create_agent",
+        args: { ...createArgs, workspaceId: parentScope?.workspaceId },
+      });
+      expect(movedReplay.isError).toBe(true);
       expect(recorder.recordedLaunches).toHaveLength(initialLaunchCount + 1);
 
       const lookup = await scopedClient.callTool({
@@ -512,7 +533,7 @@ describe("agent MCP end-to-end (offline)", () => {
         rootClient,
         scopedClient,
         parentId: parentId as string,
-        workspaceId: parentScope?.workspaceId,
+        workspaceId: cell.workspaceId as string,
         launchCount: () => recorder.recordedLaunches.length,
       });
     } finally {
@@ -525,6 +546,7 @@ describe("agent MCP end-to-end (offline)", () => {
       await rm(paseoHome, { recursive: true, force: true });
       await rm(staticDir, { recursive: true, force: true });
       await rm(parentCwd, { recursive: true, force: true });
+      await rm(cellCwd, { recursive: true, force: true });
     }
   }, 30_000);
 
@@ -563,6 +585,7 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpEnabled: true,
       staticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
       auth: { password: hashDaemonPassword("daemon-secret") },
@@ -635,6 +658,7 @@ describe("agent MCP end-to-end (offline)", () => {
         mcpEnabled: true,
         staticDir,
         mcpDebug: false,
+        relayEnabled: false,
         agentClients: createMcpRecordingAgentClients(recorder, { supportsMcpServers: true }),
         agentStoragePath: path.join(paseoHome, "agents"),
       },
@@ -744,6 +768,7 @@ describe("agent MCP end-to-end (offline)", () => {
         mcpEnabled: true,
         staticDir,
         mcpDebug: false,
+        relayEnabled: false,
         agentClients: createMcpRecordingAgentClients(recorder),
         agentStoragePath: path.join(paseoHome, "agents"),
       },
@@ -851,6 +876,7 @@ describe("agent MCP end-to-end (offline)", () => {
         mcpEnabled: true,
         staticDir,
         mcpDebug: false,
+        relayEnabled: false,
         agentClients: createMcpRecordingAgentClients(recorder, { supportsMcpServers: true }),
         agentStoragePath: path.join(paseoHome, "agents"),
       },
@@ -959,6 +985,7 @@ describe("agent MCP end-to-end (offline)", () => {
         mcpEnabled: true,
         staticDir,
         mcpDebug: false,
+        relayEnabled: false,
         agentClients: createMcpRecordingAgentClients(recorder, {
           onStartTurn: (prompt, config) => {
             if (config.title === "Operation parent") {
@@ -1124,6 +1151,7 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpEnabled: true,
       staticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: createMcpRecordingAgentClients(recorder),
       agentStoragePath: path.join(paseoHome, "agents"),
     };
@@ -1147,6 +1175,7 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpInjectIntoAgents: false,
       staticDir: disabledStaticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: createMcpRecordingAgentClients(disabledRecorder),
       agentStoragePath: path.join(disabledPaseoHome, "agents"),
     };
@@ -1234,6 +1263,7 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpEnabled: true,
       staticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: createMcpRecordingAgentClients(recorder),
       agentStoragePath: path.join(paseoHome, "agents"),
     };
@@ -1293,6 +1323,7 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpEnabled: true,
       staticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
     };
@@ -1470,6 +1501,7 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpEnabled: true,
       staticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: {
         ...createTestAgentClients(),
         codex: new StartTurnFailureClient(),
@@ -1520,6 +1552,7 @@ describe("agent MCP end-to-end (offline)", () => {
       mcpEnabled: true,
       staticDir,
       mcpDebug: false,
+      relayEnabled: false,
       agentClients: createTestAgentClients(),
       agentStoragePath: path.join(paseoHome, "agents"),
     };

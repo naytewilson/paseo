@@ -698,10 +698,7 @@ function createToolCatalog(
     if (scope !== "agent" || !callerAgentId) {
       throw new PaseoToolInputError("operationKey requires an authenticated agent scope");
     }
-    const parent = await requireAuthenticatedParentScope();
-    if (input.workspaceId !== undefined && input.workspaceId !== parent.workspaceId) {
-      throw new PaseoToolInputError("Requested workspace does not match authenticated parent");
-    }
+    await requireAuthenticatedParentScope();
     return input.operationKey.trim();
   }
   function operationKeyFor(parent: AgentMcpCallerScope, operationKey: string): string {
@@ -2028,9 +2025,6 @@ function createToolCatalog(
       throw new PaseoToolInputError("Durable operation reconciliation is unavailable");
     }
     const parent = await requireAuthenticatedParentScope();
-    if (resolved.workspaceId !== parent.workspaceId) {
-      throw new PaseoToolInputError("Requested workspace does not match authenticated parent");
-    }
     if (resolved.detached) {
       throw new PaseoToolInputError(
         "Authenticated parent operations cannot create detached agents",
