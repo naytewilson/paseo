@@ -77,6 +77,8 @@ export interface CreateAgentFromMcpInput {
   mode?: string;
   unattended?: boolean;
   promptFailure?: CreateAgentPromptFailureMode;
+  /** Redact provider start errors from logs and snapshots for keyed parent operations. */
+  redactPromptErrorDetails?: boolean;
   notifyOnFinish: boolean;
   internal?: boolean;
   detached?: boolean;
@@ -345,6 +347,7 @@ async function resolveMcpCreateAgent(
     source: input.callerAgentId
       ? { kind: "agent-message", agentId: input.callerAgentId }
       : undefined,
+    runOptions: input.redactPromptErrorDetails ? { suppressProviderErrorDetails: true } : undefined,
     createdWorktree,
     promptFailure: input.promptFailure ?? "log",
   };

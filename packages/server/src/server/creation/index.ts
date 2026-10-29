@@ -143,7 +143,7 @@ export class CreationService {
     try {
       await this.admission;
       const record = await this.read(identity);
-      if (record?.inFlight && !this.active.has(identity)) {
+      if (record?.inFlight && !record.snapshot.outcomeUnknown && !this.active.has(identity)) {
         await this.publish(identity, record, {
           phase: "failed",
           failedStage: record.inFlight,
@@ -165,7 +165,7 @@ export class CreationService {
     let record = await this.read(identity);
     if (!record) return null;
 
-    if (record.inFlight && !this.active.has(identity)) {
+    if (record.inFlight && !record.snapshot.outcomeUnknown && !this.active.has(identity)) {
       await this.publish(identity, record, {
         phase: "failed",
         failedStage: record.inFlight,
@@ -272,11 +272,18 @@ export class CreationService {
     // A partially provisioned resource or an attempted prompt needs reconciliation.
     if (!unknown) record.inFlight = null;
     let publicError = error instanceof Error ? error.message : String(error);
-    if (ambiguousCreate) publicError = "agent_create_outcome_unknown";
+    let publicErrorCode = code;
+    if (stage === "prompt") {
+      publicError = "agent_prompt_outcome_unknown";
+      publicErrorCode = "agent_prompt_outcome_unknown";
+    } else if (stage === "agent") {
+      publicError = unknown ? "agent_create_outcome_unknown" : "agent_create_failed";
+      publicErrorCode = unknown ? "agent_create_outcome_unknown" : "agent_create_failed";
+    }
     await this.publish(identity, record, {
       phase: "failed",
       error: publicError,
-      errorCode: code,
+      errorCode: publicErrorCode,
       failedStage: stage,
       outcomeUnknown: unknown,
     });

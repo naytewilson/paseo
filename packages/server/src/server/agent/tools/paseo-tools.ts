@@ -1853,6 +1853,7 @@ function createToolCatalog(
             mode: parsedArgs.settings?.modeId,
             promptFailure: "throw",
             notifyOnFinish,
+            redactPromptErrorDetails: Boolean(operationKey),
             ...(onAgentReady ? { onAgentReady } : {}),
             detached: resolvedArgs.detached,
             callerAgentId,

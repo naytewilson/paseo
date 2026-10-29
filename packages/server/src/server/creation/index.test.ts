@@ -1,6 +1,6 @@
 import pino from "pino";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
@@ -277,18 +277,35 @@ test("a restart converts an in-flight agent Create to unknown, never not-found",
 test("an uncertain prompt outcome never resends or removes its workspace and agent", async () => {
   const f = await fixture();
   let prompts = 0;
+  const providerSecret = "private-prompt-token-8421";
   f.input.createAgent = async (_id, _workspace, onReady) => {
     await onReady(agent);
     prompts++;
-    throw new Error("connection lost after provider accepted prompt");
+    throw new Error(`provider rejected prompt with credential=${providerSecret}`);
   };
   const result = await f.service.create(f.input);
   expect(result).toMatchObject({
     phase: "failed",
     failedStage: "prompt",
     outcomeUnknown: true,
+    error: "agent_prompt_outcome_unknown",
+    errorCode: "agent_prompt_outcome_unknown",
     workspace,
     agent,
+  });
+  const journalFiles = await readdir(f.directory);
+  const journalContents = await Promise.all(
+    journalFiles
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => readFile(join(f.directory, name), "utf8")),
+  );
+  expect(journalContents.join("\n")).not.toContain(providerSecret);
+  const lookup = await f.service.lookup("workspace", f.input.key);
+  expect(lookup?.snapshot).toMatchObject({
+    failedStage: "prompt",
+    outcomeUnknown: true,
+    error: "agent_prompt_outcome_unknown",
+    errorCode: "agent_prompt_outcome_unknown",
   });
   expect(await new CreationService(f.directory, silentLogger).create(f.input)).toEqual(result);
   expect(prompts).toBe(1);

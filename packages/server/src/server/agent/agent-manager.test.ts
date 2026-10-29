@@ -20,6 +20,7 @@ import {
   type ManagedAgent,
 } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import { AgentMcpCapabilityStore } from "./agent-mcp-capability.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
@@ -3282,6 +3283,64 @@ test("reloadAgentSession preserves the live session when its replacement cannot 
       disabledTools: ["list_agents"],
     });
   } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+function getPaseoBearer(config: AgentSessionConfig | undefined): string | null {
+  const paseo = config?.mcpServers?.paseo as { headers?: Record<string, string> } | undefined;
+  const authorization = paseo?.headers?.Authorization;
+  return typeof authorization === "string" ? authorization.replace(/^Bearer\s+/, "") : null;
+}
+
+test("refresh binds MCP capabilities to each runtime and revokes disabled refreshes", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-mcp-generation-"));
+  const client = new McpCapableTestAgentClient();
+  const capabilities = new AgentMcpCapabilityStore({ serverId: "srv_refresh" });
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: new AgentStorage(join(workdir, "agents"), logger),
+    logger,
+    mcpBaseUrl: "http://127.0.0.1:6768/mcp/agents",
+    agentMcpCapabilities: capabilities,
+  });
+  let agentId: string | undefined;
+
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: "wks_refresh",
+    });
+    agentId = agent.id;
+    const originalToken = getPaseoBearer(client.createdConfigs.at(-1));
+    expect(originalToken).toBeTruthy();
+    const originalScope = capabilities.resolve(originalToken, agent.id);
+    expect(originalScope?.workspaceId).toBe("wks_refresh");
+
+    await manager.reloadAgentSession(agent.id);
+    const refreshedToken = getPaseoBearer(client.resumeOverrides.at(-1) as AgentSessionConfig);
+    expect(refreshedToken).toBeTruthy();
+    expect(refreshedToken).not.toBe(originalToken);
+    expect(capabilities.resolve(originalToken, agent.id)).toBeNull();
+    expect(capabilities.resolve(refreshedToken, agent.id)?.generation).not.toBe(
+      originalScope?.generation,
+    );
+
+    manager.setPaseoToolsEnabled(false);
+    await manager.reloadAgentSession(agent.id);
+    const disabledConfig = client.resumeOverrides.at(-1) as AgentSessionConfig;
+    expect(disabledConfig.mcpServers?.paseo).toBeUndefined();
+    expect(capabilities.resolve(refreshedToken, agent.id)).toBeNull();
+
+    manager.setPaseoToolsEnabled(true);
+    await manager.reloadAgentSession(agent.id);
+    const relaunchedToken = getPaseoBearer(client.resumeOverrides.at(-1) as AgentSessionConfig);
+    expect(relaunchedToken).toBeTruthy();
+    expect(relaunchedToken).not.toBe(originalToken);
+    expect(relaunchedToken).not.toBe(refreshedToken);
+    expect(capabilities.resolve(relaunchedToken, agent.id)?.workspaceId).toBe("wks_refresh");
+  } finally {
+    if (agentId) await manager.closeAgent(agentId);
+    await manager.flush();
     rmSync(workdir, { recursive: true, force: true });
   }
 });

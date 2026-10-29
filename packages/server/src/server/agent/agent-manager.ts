@@ -373,7 +373,14 @@ export type ActiveTurnSteerDispatchResult =
 function stripSteerOptions(options?: AgentSteerOptions): AgentRunOptions | undefined {
   if (!options) return undefined;
   const { clearPendingPermissions: _, ...runOptions } = options;
-  return runOptions;
+  return stripInternalAgentRunOptions(runOptions);
+}
+
+function stripInternalAgentRunOptions(options?: AgentRunOptions): AgentRunOptions | undefined {
+  if (!options) return undefined;
+  const { suppressProviderErrorDetails, ...providerOptions } = options;
+  if (suppressProviderErrorDetails && Object.keys(providerOptions).length === 0) return undefined;
+  return providerOptions;
 }
 
 export interface WaitForAgentOptions {
@@ -921,7 +928,12 @@ export class AgentManager {
     await this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, async () => {
         if (!this.needsPluginSessionReload(agentId)) return;
-        await this.reloadAgentSessionInternal(agentId);
+        try {
+          await this.reloadAgentSessionInternal(agentId);
+        } catch (error) {
+          this.revokeAllAgentMcpCapabilities(agentId);
+          throw error;
+        }
       }),
     );
   }
@@ -1411,7 +1423,11 @@ export class AgentManager {
           },
         ),
     );
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const providerLaunchConfig = await this.withAgentMcpCapabilityOnFailure(
+      resolvedAgentId,
+      callerScope,
+      async () => this.resolveProviderLaunchConfig(launchConfig, launchContext),
+    );
     const createOptions = this.buildCreateSessionOptions(options);
     let session: AgentSession;
     try {
@@ -1549,7 +1565,11 @@ export class AgentManager {
           },
         ),
     );
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const providerLaunchConfig = await this.withAgentMcpCapabilityOnFailure(
+      resolvedAgentId,
+      callerScope,
+      async () => this.resolveProviderLaunchConfig(launchConfig, launchContext),
+    );
     const session = await this.withAgentMcpCapabilityOnFailure(resolvedAgentId, callerScope, () =>
       client.resumeSession(handle, providerLaunchConfig, launchContext, currentResumeOptions),
     );
@@ -1618,7 +1638,11 @@ export class AgentManager {
       this.revokeAgentMcpCapability(resolvedAgentId, callerScope);
       throw error;
     }
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const providerLaunchConfig = await this.withAgentMcpCapabilityOnFailure(
+      resolvedAgentId,
+      callerScope,
+      async () => this.resolveProviderLaunchConfig(launchConfig, launchContext),
+    );
     let imported: Awaited<ReturnType<NonNullable<AgentClient["importSession"]>>>;
     try {
       imported = await client.importSession(
@@ -1677,9 +1701,14 @@ export class AgentManager {
     options?: { rehydrateFromDisk?: boolean },
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
-      this.runLifecycleMutation(agentId, () =>
-        this.reloadAgentSessionInternal(agentId, overrides, options),
-      ),
+      this.runLifecycleMutation(agentId, async () => {
+        try {
+          return await this.reloadAgentSessionInternal(agentId, overrides, options);
+        } catch (error) {
+          this.revokeAllAgentMcpCapabilities(agentId);
+          throw error;
+        }
+      }),
     );
   }
 
@@ -1742,6 +1771,7 @@ export class AgentManager {
     try {
       // A persisted thread can have only one writer, even when its turn is idle.
       await this.closeReloadedSession(existing.session, agentId);
+      this.revokeAgentMcpCapabilityForSession(existing.session);
       await this.drainSessionEvents(agentId);
       this.cancelRunningProviderSubagents(agentId);
       closedExisting = this.prepareAgentForClosure(existing, "agent reloaded");
@@ -1990,14 +2020,15 @@ export class AgentManager {
     if (canClose && !canClose()) return false;
     // Retain ownership until shutdown succeeds. A failed close may still own a
     // native writer, so publishing a resumable closed snapshot would orphan it.
-    await agent.session.close();
+    // The runtime capability is revoked first so a failed close cannot keep its
+    // old provider session authorized for parent-aware tools.
     const callerScope = this.mcpCapabilityBySession.get(agent.session);
     if (callerScope) {
-      this.agentMcpCapabilities?.revokeAgent(agentId, callerScope.generation);
-      this.mcpCapabilityBySession.delete(agent.session);
+      this.revokeAgentMcpCapabilityForSession(agent.session);
     } else {
       this.agentMcpCapabilities?.revokeAgent(agentId);
     }
+    await agent.session.close();
     this.cancelRunningProviderSubagents(agentId);
     const closedAgent = this.prepareAgentForClosure(agent, "agent closed");
 
@@ -2775,8 +2806,9 @@ export class AgentManager {
     options?: AgentRunOptions;
   }): Promise<string> {
     const { agent, agentId, pendingRun, prompt, options } = params;
+    const suppressProviderErrorDetails = options?.suppressProviderErrorDetails === true;
     try {
-      const result = await agent.session.startTurn(prompt, options);
+      const result = await agent.session.startTurn(prompt, stripInternalAgentRunOptions(options));
       if (pendingRun.settled) {
         throw new Error(`Agent ${agentId} run was canceled before its turn started`);
       }
@@ -2793,7 +2825,9 @@ export class AgentManager {
         throw error;
       }
       agent.pendingReplacement = false;
-      const errorMsg = error instanceof Error ? error.message : "Failed to start turn";
+      let errorMsg = "Failed to start turn";
+      if (suppressProviderErrorDetails) errorMsg = "agent_prompt_start_failed";
+      else if (error instanceof Error) errorMsg = error.message;
       pendingRun.start = { status: "failed", error: errorMsg };
       // A terminal rejection belongs after the submitted prompt even though no provider turn exists.
       if (options?.clientMessageId) {
@@ -2808,7 +2842,7 @@ export class AgentManager {
       });
       this.finalizeForegroundTurn(agent);
       this.runs.settleForegroundRun(agentId, pendingRun.token);
-      throw error;
+      throw suppressProviderErrorDetails ? new Error(errorMsg) : error;
     }
   }
 
@@ -3938,12 +3972,8 @@ export class AgentManager {
 
   private async closeUnregisteredSession(session: AgentSession): Promise<void> {
     try {
+      this.revokeAgentMcpCapabilityForSession(session);
       await session.close();
-      const callerScope = this.mcpCapabilityBySession.get(session);
-      if (callerScope) {
-        this.revokeAgentMcpCapability(callerScope.agentId, callerScope);
-        this.mcpCapabilityBySession.delete(session);
-      }
     } catch (error) {
       this.logger.warn({ err: error }, "Failed to close unregistered agent session");
     }
@@ -5572,6 +5602,7 @@ export class AgentManager {
     const paseoToolPolicy = this.paseoToolsEnabled
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
+    const runtimeGeneration = randomUUID();
     const agentMcpCapability =
       this.paseoToolsEnabled &&
       !storedConfig.internal &&
@@ -5580,6 +5611,7 @@ export class AgentManager {
         ? (this.agentMcpCapabilities?.issue({
             agentId,
             workspaceId: options.workspaceId ?? null,
+            runtimeGeneration,
           }) ?? null)
         : null;
     const launchConfig = this.applyDaemonAppendSystemPrompt(
@@ -5603,6 +5635,19 @@ export class AgentManager {
     callerScope: AgentMcpCallerScope | null,
   ): void {
     if (callerScope) this.mcpCapabilityBySession.set(session, callerScope);
+  }
+
+  private revokeAgentMcpCapabilityForSession(session: AgentSession): void {
+    const callerScope = this.mcpCapabilityBySession.get(session);
+    if (!callerScope) return;
+    this.revokeAgentMcpCapability(callerScope.agentId, callerScope);
+    this.mcpCapabilityBySession.delete(session);
+  }
+
+  private revokeAllAgentMcpCapabilities(agentId: string): void {
+    this.agentMcpCapabilities?.revokeAgent(agentId);
+    const active = this.agents.get(agentId);
+    if (active) this.mcpCapabilityBySession.delete(active.session);
   }
 
   private revokeAgentMcpCapability(agentId: string, callerScope: AgentMcpCallerScope | null): void {

@@ -15,7 +15,6 @@ export interface IssuedAgentMcpCapability {
 }
 
 interface CapabilityRecord {
-  token: string;
   secretDigest: Buffer;
   scope: AgentMcpCallerScope;
 }
@@ -24,9 +23,10 @@ const CAPABILITY_ID = /^[0-9a-f-]{36}$/i;
 const CAPABILITY_SECRET = /^[A-Za-z0-9_-]{43}$/;
 
 /**
- * Holds runtime-bound bearer credentials for the current local agent MCP scopes.
- * A caller ID in a URL is only a consistency assertion; the credential selects
- * the server-side identity.
+ * Holds verification digests and identity bindings for runtime capabilities.
+ * The bearer is returned only to the session-config builder and is never kept
+ * in this store. A caller ID in a URL is only a consistency assertion; the
+ * credential selects the server-side identity.
  */
 export class AgentMcpCapabilityStore {
   private readonly records = new Map<string, CapabilityRecord>();
@@ -38,32 +38,33 @@ export class AgentMcpCapabilityStore {
     this.daemonGeneration = options.daemonGeneration ?? randomUUID();
   }
 
-  issue(input: { agentId: string; workspaceId: string | null }): IssuedAgentMcpCapability {
+  issue(input: {
+    agentId: string;
+    workspaceId: string | null;
+    runtimeGeneration: string;
+  }): IssuedAgentMcpCapability {
     if (!input.agentId.trim()) throw new Error("Agent MCP capabilities require agentId");
-    const activeId = this.recordsByAgent.get(input.agentId)?.values().next().value as
-      | string
-      | undefined;
-    const activeRecord = activeId ? this.records.get(activeId) : undefined;
-    if (activeRecord) {
-      if (activeRecord.scope.workspaceId !== input.workspaceId) {
-        throw new Error("Agent MCP capability workspace cannot change during a runtime generation");
+    if (!input.runtimeGeneration.trim()) {
+      throw new Error("Agent MCP capabilities require a runtime generation");
+    }
+    for (const id of this.recordsByAgent.get(input.agentId) ?? []) {
+      if (this.records.get(id)?.scope.generation === input.runtimeGeneration) {
+        throw new Error("Agent MCP capability generation has already been issued");
       }
-      return { token: activeRecord.token, scope: { ...activeRecord.scope } };
     }
 
     const id = randomUUID();
     const secret = randomBytes(32).toString("base64url");
-    const generation = randomUUID();
     const scope: AgentMcpCallerScope = {
       serverId: this.options.serverId,
       daemonGeneration: this.daemonGeneration,
-      generation,
+      generation: input.runtimeGeneration,
       agentId: input.agentId,
       workspaceId: input.workspaceId,
       scope: "agent_mcp_parent_v1",
     };
     const token = `${id}.${secret}`;
-    this.records.set(id, { token, secretDigest: this.digest(secret), scope });
+    this.records.set(id, { secretDigest: this.digest(secret), scope });
     const agentRecords = this.recordsByAgent.get(input.agentId) ?? new Set<string>();
     agentRecords.add(id);
     this.recordsByAgent.set(input.agentId, agentRecords);
