@@ -107,7 +107,7 @@ jobs:
 
   build-desktop-darwin:
     if: ${{ vars.PASEO_MACOS_CI_ENABLED == 'true' }}
-    runs-on: [self-hosted, macOS, ARM64, nayte-macos]
+    runs-on: [self-hosted, nayte-macos, ARM64, nayte-macos]
     steps:
       - uses: actions/checkout@v4
 
